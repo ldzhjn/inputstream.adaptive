@@ -118,6 +118,7 @@ bool SegmentCache::Get(const Key& key, std::vector<uint8_t>& data)
     std::ifstream file(entry->path, std::ios::binary | std::ios::ate);
     if (!file || file.tellg() != static_cast<std::streamoff>(entry->size))
     {
+      file.close();
       Erase(entry);
       return false;
     }
@@ -125,6 +126,7 @@ bool SegmentCache::Get(const Key& key, std::vector<uint8_t>& data)
     data.resize(entry->size);
     if (!file.read(reinterpret_cast<char*>(data.data()), data.size()))
     {
+      file.close();
       data.clear();
       Erase(entry);
       return false;

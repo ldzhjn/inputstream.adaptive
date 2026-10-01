@@ -99,6 +99,7 @@ TEST(SegmentCache, RejectsTruncatedDiskEntry)
     const auto file = *std::filesystem::directory_iterator(sessionDirectory.path());
     std::ofstream(file.path(), std::ios::binary | std::ios::trunc).put(0);
     EXPECT_FALSE(cache.Get(key, bytes));
+    EXPECT_TRUE(std::filesystem::is_empty(sessionDirectory.path()));
   }
 
   EXPECT_TRUE(std::filesystem::is_empty(root));

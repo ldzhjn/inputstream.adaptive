@@ -9,6 +9,7 @@ add_executable(${BINARY}
     TestDASHTree.cpp
     TestHLSTree.cpp
     TestSmoothTree.cpp
+    TestSegmentCache.cpp
     TestHelper.cpp
     TestUtils.cpp
     ../aes_decrypter.cpp
@@ -37,6 +38,7 @@ add_executable(${BINARY}
     ../common/Segment.cpp
     ../common/SegmentBase.cpp
     ../common/SegmentBuffer.cpp
+    ../common/SegmentCache.cpp
     ../common/SegmentList.cpp
     ../common/SegTemplate.cpp
     ../SrvBroker.cpp

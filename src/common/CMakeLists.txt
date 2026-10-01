@@ -19,6 +19,7 @@ set(SOURCES
   Segment.cpp
   SegmentBase.cpp
   SegmentBuffer.cpp
+  SegmentCache.cpp
   SegmentList.cpp
   SegTemplate.cpp
 )
@@ -45,6 +46,7 @@ set(HEADERS
   Segment.h
   SegmentBase.h
   SegmentBuffer.h
+  SegmentCache.h
   SegmentList.h
   SegTemplate.h
 )

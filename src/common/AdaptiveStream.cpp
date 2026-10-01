@@ -105,6 +105,59 @@ bool adaptive::AdaptiveStream::DownloadImpl(const DownloadInfo& downloadInfo,
   // Append stream parameters
   URL::AppendParameters(url, m_streamParams);
 
+  // Keep replay within the manifest seek window, but avoid fetching previously
+  // downloaded media again when the player seeks backward and then forward.
+  ADP::SegmentCache* cache = m_tree->GetSegmentCache();
+  const bool useCache = cache && m_tree->IsLive() && !downloadData &&
+                        downloadInfo.m_segmentBuffer &&
+                        !downloadInfo.m_segmentBuffer->segment.IsInitialization();
+  ADP::SegmentCache::Key cacheKey{url, headers, 0, 0};
+  bool canStore = false;
+  bool isAesSegment = false;
+  std::vector<uint8_t> cacheData;
+  std::vector<ADP::SegmentCache::Chunk> cacheChunks;
+  if (useCache)
+  {
+    const auto& segment = downloadInfo.m_segmentBuffer->segment;
+    cacheKey.number = segment.m_number;
+    cacheKey.startPts = segment.startPTS_;
+    cacheKey.periodId = current_period_->GetId();
+    cacheKey.periodSequence = current_period_->GetSequence();
+    isAesSegment = segment.AESKeyInfo().has_value();
+    if (isAesSegment)
+    {
+      cacheKey.keyUrl = segment.AESKeyInfo()->keyUrl;
+      cacheKey.iv = segment.AESKeyInfo()->iv;
+    }
+    // A failed attempt can leave partial bytes in the destination buffer.
+    canStore = downloadInfo.m_segmentBuffer->BufferSize() == 0;
+    if (canStore)
+    {
+      std::vector<uint8_t> cachedData;
+      std::vector<ADP::SegmentCache::Chunk> cachedChunks;
+      if (cache->Get(cacheKey, cachedData, &cachedChunks))
+      {
+        size_t offset{0};
+        for (const auto& chunk : cachedChunks)
+        {
+          if (thread_data_->State() == THREADDATA::ThState::STOPPED)
+            return false;
+
+          std::vector<uint8_t> output;
+          m_tree->OnDataArrived(segment.m_number,
+                                downloadInfo.m_segmentBuffer->segment.AESKeyInfo(), m_decrypterIv,
+                                cachedData.data() + offset, chunk.size, output,
+                                downloadInfo.m_segmentBuffer->BufferSize(), chunk.isLast);
+          downloadInfo.m_segmentBuffer->AppendBuffer(output);
+          thread_data_->cvRW.notify_all();
+          offset += chunk.size;
+        }
+        LOG::LogF(LOGDEBUG, "[AS-%u] Reused %zu cached segment bytes", clsId, cachedData.size());
+        return true;
+      }
+    }
+  }
+
   CURL::CUrl curl{url};
   curl.AddHeaders(headers);
 
@@ -143,6 +196,23 @@ bool adaptive::AdaptiveStream::DownloadImpl(const DownloadInfo& downloadInfo,
           // The status can be changed after waiting for the lock_guard e.g. video seek/stop
           if (thread_data_->State() == THREADDATA::ThState::STOPPED)
             break;
+
+          // HLS AES-128 is decrypted in OnDataArrived. Keep its encrypted
+          // chunks and boundaries so replay follows the same decryption path.
+          if (isAesSegment && canStore)
+          {
+            if (bytesRead > cache->MaxBytes() - cacheData.size())
+            {
+              canStore = false;
+              cacheData.clear();
+              cacheChunks.clear();
+            }
+            else
+            {
+              cacheData.insert(cacheData.end(), bufferData.begin(), bufferData.begin() + bytesRead);
+              cacheChunks.push_back({bytesRead, isLastChunk});
+            }
+          }
 
           std::vector<uint8_t> bufferOutput;
 
@@ -187,6 +257,13 @@ bool adaptive::AdaptiveStream::DownloadImpl(const DownloadInfo& downloadInfo,
         LOG::Log(LOGDEBUG,
                  "[AS-%u] Download finished: %s (downloaded %zu byte, speed %0.2lf byte/s)", clsId,
                  url.c_str(), totalBytesRead, downloadSpeed);
+        if (useCache && canStore && thread_data_->State() != THREADDATA::ThState::STOPPED)
+        {
+          if (isAesSegment)
+            cache->Put(std::move(cacheKey), std::move(cacheData), std::move(cacheChunks));
+          else
+            cache->Put(std::move(cacheKey), downloadInfo.m_segmentBuffer->ReadBuffer());
+        }
         return true;
       }
     }

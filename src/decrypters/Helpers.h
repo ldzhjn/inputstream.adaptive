@@ -64,6 +64,13 @@ std::string KeySystemToUUIDstr(std::string_view ks);
 bool IsValidKeySystem(std::string_view keySystem);
 
 /*!
+ * \brief Check whether a KeyId is a 128-bit hexadecimal string.
+ * \param kid The KeyId to validate
+ * \return True if the KeyId is valid, otherwise false.
+ */
+bool IsValidKID(std::string_view kid);
+
+/*!
  * \brief Generate an hash by using the base domain of an URL.
  * \param url An URL
  * \return The hash of a base domain URL

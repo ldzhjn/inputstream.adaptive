@@ -210,6 +210,18 @@ std::vector<DRM::DRMInfo> CFragmentedSampleReader::GetInitDRMInfo()
 
       drmInfos.emplace_back(drmInfo);
     }
+
+    // Some encrypted CMAF streams carry the default KID only in the track's tenc box
+    // and do not include a usable PSSH box. Keep the Common Encryption information
+    // so a configured decrypter can create its session with that KID.
+    if (drmInfos.empty() && !defaultKid.empty())
+    {
+      DRM::DRMInfo drmInfo;
+      drmInfo.defaultKid = STRING::ToHexadecimal(defaultKid);
+      drmInfo.cryptoMode = cryptoMode;
+      drmInfos.emplace_back(std::move(drmInfo));
+      LOG::LogF(LOGDEBUG, "Found protected sample description KID without usable PSSH");
+    }
   }
 
   return drmInfos;

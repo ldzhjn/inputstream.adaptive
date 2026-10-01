@@ -71,6 +71,17 @@ public:
   uint64_t available_time_{0}; // in ms
   uint64_t m_liveDelay{0}; // Apply a delay in seconds from the live edge
 
+  void SetLiveStartTimestamp(PLAYLIST::CPeriod* period, uint64_t ptsMs)
+  {
+    m_liveStartPeriod = period;
+    m_liveStartPtsMs = ptsMs;
+  }
+
+  std::optional<uint64_t> GetLiveStartTimestamp(PLAYLIST::CPeriod* period) const
+  {
+    return m_liveStartPeriod == period ? m_liveStartPtsMs : std::nullopt;
+  }
+
   AdaptiveTree() = default;
   AdaptiveTree(const AdaptiveTree& left);
   virtual ~AdaptiveTree() = default;
@@ -295,6 +306,10 @@ public:
     // \brief Stop performing new updates.
     void Stop();
 
+    // Wait before applying an update if a reader paused manifest changes while
+    // the update thread was downloading without the tree lock.
+    bool WaitForResume(std::unique_lock<std::mutex>& updateLock);
+
   private:
     void Worker();
     void Pause();
@@ -313,7 +328,7 @@ public:
     std::condition_variable m_cvUpdInterval;
     std::mutex m_waitMutex;
     std::condition_variable m_cvWait;
-    bool m_threadStop{false};
+    std::atomic<bool> m_threadStop{false};
     bool m_resetInterval{false};
   };
 
@@ -417,11 +432,23 @@ protected:
    *        Intended for live streaming that does have a defined update time interval.
    */
   virtual void OnUpdateSegments() { lastUpdated_ = std::chrono::system_clock::now(); }
+  virtual void OnUpdateSegments(std::unique_lock<std::mutex>& updateLock)
+  {
+    OnUpdateSegments();
+  }
+
+  PLAYLIST::CPeriod* m_liveStartPeriod{nullptr};
+  std::optional<uint64_t> m_liveStartPtsMs;
 
   // Manifest update interval in ms,
   // Non-zero value: refresh interval starting from the moment mpd download was initiated
   // Value 0: refresh each time we need to make new segments
   std::atomic<uint64_t> m_updateInterval{PLAYLIST::NO_VALUE};
+
+  // Last update interval that came from a manifest, as opposed to one a parser
+  // applied as a temporary backoff. Since m_updateInterval is set to NO_VALUE
+  // before each update, a parser that backs off has no other usable base value.
+  std::atomic<uint64_t> m_lastValidUpdateInterval{0};
   TreeUpdateThread m_updThread;
   std::atomic<std::chrono::time_point<std::chrono::system_clock>> lastUpdated_{std::chrono::system_clock::now()};
 

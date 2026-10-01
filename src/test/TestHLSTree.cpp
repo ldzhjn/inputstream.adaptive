@@ -422,3 +422,27 @@ TEST_F(HLSTreeTest, MultipleEncryptionSequenceDrm)
   }
   EXPECT_TRUE(ks2.empty());
 }
+
+TEST_F(HLSTreeTest, FairPlaySkdUriProvidesClearKeyKid)
+{
+  testHelper::effectiveUrl = "https://foo.bar/hls/video/stream_name/master.m3u8";
+
+  bool ret = OpenTestFileMaster("hls/encrypt_master.m3u8",
+                                "https://baz.qux/hls/video/stream_name/master.m3u8", {});
+  ASSERT_TRUE(ret);
+
+  std::string varDownloadUrl =
+      tree->m_currentPeriod->GetAdaptationSets()[0]->GetRepresentations()[0]->GetSourceUrl();
+  ret = OpenTestFileVariant("hls/encrypt_fairplay_cbcs.m3u8", varDownloadUrl,
+                            tree->m_currentPeriod, tree->m_currentAdpSet, tree->m_currentRepr);
+  ASSERT_TRUE(ret);
+
+  const auto& drmInfos = tree->m_periods[0]
+                             ->GetAdaptationSets()[0]
+                             ->GetRepresentations()[0]
+                             ->DrmInfos();
+  ASSERT_EQ(drmInfos.size(), 1);
+  EXPECT_EQ(drmInfos[0].keySystem, DRM::KS_FAIRPLAY);
+  EXPECT_EQ(drmInfos[0].defaultKid, "11111111123412341234000000000000");
+  EXPECT_EQ(drmInfos[0].cryptoMode, CryptoMode::AES_CBC);
+}

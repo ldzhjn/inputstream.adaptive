@@ -195,6 +195,14 @@ bool DRM::IsValidKeySystem(std::string_view keySystem)
     keySystem == DRM::KS_CLEARKEY;
 }
 
+bool DRM::IsValidKID(std::string_view kid)
+{
+  return kid.size() == 32 &&
+         std::all_of(kid.cbegin(), kid.cend(), [](const char c)
+                     { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+                              (c >= 'A' && c <= 'F'); });
+}
+
 std::vector<uint8_t> DRM::ConvertKidStrToBytes(std::string_view kidStr)
 {
   if (kidStr.empty())

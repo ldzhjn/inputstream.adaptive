@@ -32,6 +32,10 @@ namespace
 // Timescale for ms
 constexpr uint64_t TIMESCALE = 1000;
 
+// Lower bound for the update interval backoff, in ms, to keep the halving from
+// reaching zero and stopping the update thread
+constexpr uint64_t MIN_UPDATE_INTERVAL_MS = 500;
+
 // \brief Parse a tag (e.g. #EXT-X-VERSION:1) to extract name and value
 void ParseTagNameValue(const std::string& line, std::string& tagName, std::string& tagValue)
 {
@@ -438,21 +442,9 @@ bool adaptive::CHLSTree::ProcessChildManifest(PLAYLIST::CPeriod* period,
     if (!DownloadChildManifest(adp, rep, resp))
       return false;
 
-    status = ParseChildManifest(resp.data, URL::GetUrlPath(resp.effectiveUrl), period, adp, rep);
+    status = ApplyChildManifestResponse(resp, period, adp, rep, currentSegNumber);
 
-    if (status == ParseStatus::SUCCESS)
-    {
-      // If current segment number is not set, we need to set it in order to sync the current segment between playlist updates
-      // This is done here because ParseChildManifest in the event of discontinuity can clear the current "outdated" period
-      // and so invalidate the current segment
-      if (currentSegNumber == PLAYLIST::SEGMENT_NO_NUMBER && rep->current_segment_.has_value())
-      {
-        currentSegNumber = rep->current_segment_->m_number;
-      }
-
-      PrepareSegments(period, adp, rep, currentSegNumber);
-    }
-    else if (status == ParseStatus::INVALID)
+    if (status == ParseStatus::INVALID)
     {
       // Give the provider a minimum amount of time before trying to download it again
       std::this_thread::sleep_for(std::chrono::seconds(1));
@@ -461,6 +453,26 @@ bool adaptive::CHLSTree::ProcessChildManifest(PLAYLIST::CPeriod* period,
   }
 
   return status == ParseStatus::SUCCESS;
+}
+
+adaptive::CHLSTree::ParseStatus adaptive::CHLSTree::ApplyChildManifestResponse(
+    const UTILS::CURL::HTTPResponse& resp,
+    PLAYLIST::CPeriod* period,
+    PLAYLIST::CAdaptationSet* adp,
+    PLAYLIST::CRepresentation* rep,
+    uint64_t currentSegNumber)
+{
+  ParseStatus status =
+      ParseChildManifest(resp.data, URL::GetUrlPath(resp.effectiveUrl), period, adp, rep);
+  if (status == ParseStatus::SUCCESS)
+  {
+    // A discontinuity can replace the current period during parsing. Preserve
+    // the segment number so the new timeline stays aligned with playback.
+    if (currentSegNumber == PLAYLIST::SEGMENT_NO_NUMBER && rep->current_segment_.has_value())
+      currentSegNumber = rep->current_segment_->m_number;
+    PrepareSegments(period, adp, rep, currentSegNumber);
+  }
+  return status;
 }
 
  adaptive::CHLSTree::ParseStatus adaptive::CHLSTree::ParseChildManifest(
@@ -1122,8 +1134,96 @@ void adaptive::CHLSTree::OnUpdateSegments()
     // so avoid requesting updates too quickly but you also need to make sure
     // that we have segments to mitigate a buffering problem
     // so try halve the interval time in a temporary way
-    m_updateInterval = m_updateInterval / 2;
+    m_updateInterval = std::max<uint64_t>(m_lastValidUpdateInterval / 2, MIN_UPDATE_INTERVAL_MS);
     // Reset the interval on the next update, to restore the original value
+    m_updThread.ResetInterval();
+  }
+}
+
+void adaptive::CHLSTree::OnUpdateSegments(std::unique_lock<std::mutex>& updateLock)
+{
+  lastUpdated_ = std::chrono::system_clock::now();
+
+  struct RefreshRequest
+  {
+    CPeriod* period;
+    CAdaptationSet* adp;
+    CRepresentation* rep;
+    std::string url;
+  };
+
+  std::vector<RefreshRequest> requests;
+  for (auto& adp : m_currentPeriod->GetAdaptationSets())
+  {
+    for (auto& rep : adp->GetRepresentations())
+    {
+      if (!rep->IsEnabled())
+        continue;
+
+      std::string url = rep->GetSourceUrl();
+      URL::AppendParameters(url, m_manifestParams);
+      requests.push_back({m_currentPeriod, adp.get(), rep.get(), std::move(url)});
+    }
+  }
+
+  // A playlist download can take several seconds. Let segment readers advance
+  // while the response is in flight, then apply it under the tree lock.
+  const auto headers = m_manifestHeaders;
+  bool isInvalidUpdate = false;
+  for (const auto& request : requests)
+  {
+    ParseStatus status = ParseStatus::INVALID;
+    size_t attemptsLeft = 3;
+    while (status == ParseStatus::INVALID && attemptsLeft > 0)
+    {
+      UTILS::CURL::HTTPResponse resp;
+      updateLock.unlock();
+      const bool downloaded = !request.url.empty() &&
+                              DownloadManifestChild(request.url, headers, {}, resp);
+      updateLock.lock();
+      if (!m_updThread.WaitForResume(updateLock))
+        break;
+
+      // A period or representation can change while the download is in flight.
+      // Never apply a response to an object that has been removed from the tree.
+      if (m_currentPeriod != request.period)
+        break;
+      const auto& adps = m_currentPeriod->GetAdaptationSets();
+      auto adpIt = std::find_if(adps.begin(), adps.end(), [&](const auto& adp) {
+        return adp.get() == request.adp;
+      });
+      if (adpIt == adps.end())
+        break;
+      const auto& reps = (*adpIt)->GetRepresentations();
+      if (std::none_of(reps.begin(), reps.end(), [&](const auto& rep) {
+            return rep.get() == request.rep;
+          }))
+        break;
+
+      if (!downloaded)
+        break;
+
+      SaveManifest(request.adp, resp.data, request.url);
+      status = ApplyChildManifestResponse(resp, request.period, request.adp, request.rep,
+                                          PLAYLIST::SEGMENT_NO_NUMBER);
+      if (status == ParseStatus::INVALID)
+      {
+        --attemptsLeft;
+        if (attemptsLeft > 0)
+        {
+          updateLock.unlock();
+          std::this_thread::sleep_for(std::chrono::seconds(1));
+          updateLock.lock();
+        }
+      }
+    }
+    if (status != ParseStatus::SUCCESS)
+      isInvalidUpdate = true;
+  }
+
+  if (isInvalidUpdate)
+  {
+    m_updateInterval = std::max<uint64_t>(m_lastValidUpdateInterval / 2, MIN_UPDATE_INTERVAL_MS);
     m_updThread.ResetInterval();
   }
 }
@@ -1315,13 +1415,35 @@ void adaptive::CHLSTree::ProcessEncryption(
     else if (encryptMethod == "SAMPLE-AES")
       drmInfo.cryptoMode = CryptoMode::AES_CBC;
   }
-  // FAIRPLAY (unsupported, added to test MP4 stream with Clearkey)
+  // FAIRPLAY (key management is unsupported, encrypted MP4 can be used with ClearKey)
   else if (STRING::CompareNoCase(keyFormat, "com.apple.streamingkeydelivery"))
   {
     DRM::DRMInfo& drmInfo = drmInfos[DRM::KS_FAIRPLAY]; // Create or update
     drmInfo.keySystem = DRM::KS_FAIRPLAY;
 
-    // There is no DRM/Key management implementation
+    // FairPlay HLS can identify the content key with an skd:// URI. Although FairPlay
+    // key management is not implemented, preserve a valid KID so a configured
+    // ClearKey decrypter can handle SAMPLE-AES fMP4 streams.
+    static constexpr std::string_view URI_SKD_SCHEME{"skd://"};
+    if (STRING::StartsWith(uriUrl, URI_SKD_SCHEME))
+    {
+      std::string keyId = uriUrl.substr(URI_SKD_SCHEME.size());
+      // e.g. skd://linear/00112233445566778899AABBCCDDEEFF?mt=FOUR_K_H&vendorId=example
+      const size_t queryPos = keyId.find_first_of("?#");
+      if (queryPos != std::string::npos)
+        keyId.erase(queryPos);
+
+      const size_t separatorPos = keyId.find_last_of("/:");
+      if (separatorPos != std::string::npos)
+        keyId.erase(0, separatorPos + 1);
+
+      if (STRING::StartsWith(keyId, "0x"))
+        keyId.erase(0, 2);
+      STRING::ReplaceAll(keyId, "-", "");
+
+      if (DRM::IsValidKID(keyId))
+        drmInfo.defaultKid = STRING::ToLower(keyId);
+    }
 
     if (encryptMethod == "SAMPLE-AES-CTR")
       drmInfo.cryptoMode = CryptoMode::AES_CTR;
@@ -1392,6 +1514,7 @@ bool adaptive::CHLSTree::ParseRenditon(const Rendition& r,
 
 bool adaptive::CHLSTree::ParseMultivariantPlaylist(const std::string& data)
 {
+  const auto& manifestCfg = CSrvBroker::GetKodiProps().GetManifestConfig();
   std::stringstream streamData{data};
   MultivariantPlaylist pl;
 
@@ -1529,7 +1652,18 @@ bool adaptive::CHLSTree::ParseMultivariantPlaylist(const std::string& data)
     if (varFound)
       codecStr = GetAudioCodec(varFound->m_codecs);
     else
-      LOG::LogF(LOGERROR, "Cannot find variant for AUDIO GROUP-ID: %s", r.m_groupId.c_str());
+    {
+      if (manifestCfg.hlsAddOrphansRenditions)
+      {
+        LOG::LogF(LOGDEBUG, "Add AUDIO type variant with orphan GROUP-ID: %s", r.m_groupId.c_str());
+      }
+      else
+      {
+        LOG::LogF(LOGWARNING, "Skipped AUDIO type variant with orphan GROUP-ID: %s",
+                  r.m_groupId.c_str());
+        continue;
+      }
+    }
 
     if (codecStr.empty())
       codecStr = CODEC::FOURCC_MP4A; // Fallback
@@ -1581,6 +1715,21 @@ bool adaptive::CHLSTree::ParseMultivariantPlaylist(const std::string& data)
     std::string codecStr;
     if (varFound)
       codecStr = GetSubtitleCodec(varFound->m_codecs);
+    else
+    {
+      if (manifestCfg.hlsAddOrphansRenditions)
+      {
+        LOG::LogF(LOGDEBUG, "Add SUBTITLE type variant with orphan GROUP-ID: %s",
+                  r.m_groupId.c_str());
+      }
+      else
+      {
+        LOG::LogF(LOGWARNING, "Skipped SUBTITLE type variant with orphan GROUP-ID: %s",
+                  r.m_groupId.c_str());
+        continue;
+      }
+    }
+
     if (codecStr.empty())
       codecStr = CODEC::FOURCC_WVTT; // WebVTT as default subtitle codec
 

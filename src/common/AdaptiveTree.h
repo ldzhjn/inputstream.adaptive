@@ -11,6 +11,7 @@
 #include "AdaptationSet.h"
 #include "Period.h"
 #include "Representation.h"
+#include "SegmentCache.h"
 
 #include <atomic>
 #include <chrono>
@@ -241,6 +242,7 @@ public:
    * \return True for live streaming content, otherwise false for VOD content
    */
   bool IsLive() const { return m_isLive; }
+  ADP::SegmentCache* GetSegmentCache() const { return m_segmentCache.get(); }
 
   /*!
    * \brief Determines if a live manifest needs updates when new segments are requested
@@ -438,6 +440,7 @@ protected:
   bool m_isReqPrepareStream{false};
 
 private:
+  std::shared_ptr<ADP::SegmentCache> m_segmentCache;
   std::shared_ptr<const ChaptersSnapshot> m_chaptersSnapshot{
       std::make_shared<const ChaptersSnapshot>()};
   // Guards the m_chaptersSnapshot pointer only, never held while doing any work

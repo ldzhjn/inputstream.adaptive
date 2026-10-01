@@ -33,6 +33,7 @@ namespace adaptive
     m_manifestParams = left.m_manifestParams;
     m_manifestHeaders = left.m_manifestHeaders;
     m_settings = left.m_settings;
+    m_segmentCache = left.m_segmentCache;
     m_pathSaveManifest = left.m_pathSaveManifest;
     stream_start_ = left.stream_start_;
 
@@ -116,6 +117,28 @@ namespace adaptive
   {
     SortTree();
     OverrideStreamsMediaFlags(m_periods);
+
+    // The cache belongs to the playback session, not to an individual audio or
+    // video worker. This makes the configured size a total limit for all tracks.
+    if (m_isLive && GetTreeType() == TreeType::DASH && !m_segmentCache)
+    {
+      const auto& settings = CSrvBroker::GetSettings();
+      const std::string mode = settings.GetSegmentCacheMode();
+      if (mode == "memory" || mode == "disk")
+      {
+        const auto cacheMode =
+            mode == "disk" ? ADP::SegmentCache::Mode::DISK : ADP::SegmentCache::Mode::MEMORY;
+        const size_t maxBytes =
+            static_cast<size_t>(settings.GetSegmentCacheSizeMiB()) * 1024 * 1024;
+        m_segmentCache = std::make_shared<ADP::SegmentCache>(
+            cacheMode, maxBytes, mode == "disk" ? settings.GetSegmentCachePath() : "");
+        if (!m_segmentCache->IsAvailable())
+        {
+          LOG::Log(LOGERROR, "Cannot initialize live DASH segment cache");
+          m_segmentCache.reset();
+        }
+      }
+    }
 
     // A manifest can provide live delay value, if not so we use our default
     // value of 16 secs, this is needed to ensure an appropriate playback,

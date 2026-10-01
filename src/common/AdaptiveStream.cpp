@@ -40,8 +40,7 @@ uint32_t adaptive::AdaptiveStream::globalClsId = 0;
 adaptive::AdaptiveStream::AdaptiveStream(AdaptiveTree* tree,
                                          PLAYLIST::CAdaptationSet* adp,
                                          PLAYLIST::CRepresentation* initialRepr)
-  : m_segmentCache(adp->GetStreamType() == StreamType::VIDEO ? 32 * 1024 * 1024 : 8 * 1024 * 1024),
-    m_tree(tree),
+  : m_tree(tree),
     current_period_(m_tree->m_currentPeriod),
     current_adp_(adp),
     current_rep_(initialRepr),
@@ -108,10 +107,10 @@ bool adaptive::AdaptiveStream::DownloadImpl(const DownloadInfo& downloadInfo,
 
   // Keep replay within the manifest seek window, but avoid fetching previously
   // downloaded media again when the player seeks backward and then forward.
-  const bool useCache = !downloadData && downloadInfo.m_segmentBuffer && m_tree->IsLive() &&
-                        m_tree->GetTreeType() == TreeType::DASH &&
+  ADP::SegmentCache* cache = m_tree->GetSegmentCache();
+  const bool useCache = cache && !downloadData && downloadInfo.m_segmentBuffer &&
                         !downloadInfo.m_segmentBuffer->segment.IsInitialization();
-  ADP::SegmentMemoryCache::Key cacheKey{url, headers, 0, 0};
+  ADP::SegmentCache::Key cacheKey{url, headers, 0, 0};
   bool canStore = false;
   if (useCache)
   {
@@ -123,7 +122,7 @@ bool adaptive::AdaptiveStream::DownloadImpl(const DownloadInfo& downloadInfo,
     if (canStore)
     {
       std::vector<uint8_t> cachedData;
-      if (m_segmentCache.Get(cacheKey, cachedData))
+      if (cache->Get(cacheKey, cachedData))
       {
         if (thread_data_->State() == THREADDATA::ThState::STOPPED)
           return false;
@@ -218,7 +217,7 @@ bool adaptive::AdaptiveStream::DownloadImpl(const DownloadInfo& downloadInfo,
                  "[AS-%u] Download finished: %s (downloaded %zu byte, speed %0.2lf byte/s)", clsId,
                  url.c_str(), totalBytesRead, downloadSpeed);
         if (useCache && canStore && thread_data_->State() != THREADDATA::ThState::STOPPED)
-          m_segmentCache.Put(std::move(cacheKey), downloadInfo.m_segmentBuffer->ReadBuffer());
+          cache->Put(std::move(cacheKey), downloadInfo.m_segmentBuffer->ReadBuffer());
         return true;
       }
     }

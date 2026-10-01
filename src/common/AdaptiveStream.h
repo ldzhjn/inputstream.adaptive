@@ -11,7 +11,6 @@
 #include "AdaptiveUtils.h"
 #include "Segment.h"
 #include "SegmentBuffer.h"
-#include "SegmentMemoryCache.h"
 #include "samplereader/SampleReader.h"
 
 #include <atomic>
@@ -155,9 +154,6 @@ enum class EVENT_TYPE
     // Segment download section
 
     ADP::CSegmentBuffers m_segBuffers;
-
-    // Bounded replay of complete live DASH media segments after a seek.
-    ADP::SegmentMemoryCache m_segmentCache;
 
     // Info to execute the download
     struct DownloadInfo

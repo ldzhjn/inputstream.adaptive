@@ -10,6 +10,8 @@
 #include "utils/StringUtils.h"
 #include "utils/log.h"
 
+#include <algorithm>
+
 #ifndef INPUTSTREAM_TEST_BUILD
 #include <kodi/addon-instance/Inputstream.h>
 #include <kodi/Filesystem.h>
@@ -125,6 +127,25 @@ int ADP::SETTINGS::CCompSettings::GetChooserTestSegsAudio() const
 int ADP::SETTINGS::CCompSettings::GetMediaType() const
 {
   return kodi::addon::GetSettingInt("MEDIATYPE");
+}
+
+std::string ADP::SETTINGS::CCompSettings::GetSegmentCacheMode() const
+{
+  return kodi::addon::GetSettingString("adaptivestream.cache.mode", "off");
+}
+
+uint32_t ADP::SETTINGS::CCompSettings::GetSegmentCacheSizeMiB() const
+{
+  return static_cast<uint32_t>(
+      std::clamp(kodi::addon::GetSettingInt("adaptivestream.cache.size", 32), 1, 2048));
+}
+
+std::string ADP::SETTINGS::CCompSettings::GetSegmentCachePath() const
+{
+  std::string path = kodi::addon::GetSettingString("adaptivestream.cache.path");
+  if (path.empty())
+    path = "special://userdata/addon_data/inputstream.adaptive/segment_cache";
+  return kodi::vfs::TranslateSpecialProtocol(path);
 }
 
 bool ADP::SETTINGS::CCompSettings::IsDisableSecureDecoder() const

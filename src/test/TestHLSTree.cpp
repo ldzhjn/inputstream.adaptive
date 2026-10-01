@@ -10,6 +10,11 @@
 #include "../decrypters/Helpers.h"
 #include "../CompKodiProps.h"
 #include "../SrvBroker.h"
+#include "../common/SegmentCache.h"
+
+#include <chrono>
+#include <filesystem>
+#include <fstream>
 
 #include <gtest/gtest.h>
 
@@ -421,4 +426,64 @@ TEST_F(HLSTreeTest, MultipleEncryptionSequenceDrm)
     ks2.erase(drmInfo.keySystem);
   }
   EXPECT_TRUE(ks2.empty());
+}
+
+TEST_F(HLSTreeTest, CachedAesSegmentReplaysThroughDecryptor)
+{
+  tree->Configure(m_reprChooser, "");
+
+  // First two AES-128-CBC blocks from NIST SP 800-38A, example F.2.1.
+  const std::vector<uint8_t> encrypted{0x76, 0x49, 0xab, 0xac, 0x81, 0x19, 0xb2, 0x46,
+                                       0xce, 0xe9, 0x8e, 0x9b, 0x12, 0xe9, 0x19, 0x7d,
+                                       0x50, 0x86, 0xcb, 0x9b, 0x50, 0x72, 0x19, 0xee,
+                                       0x95, 0xdb, 0x11, 0x3a, 0x91, 0x76, 0x78, 0xb2};
+  const std::vector<uint8_t> expected{0x6b, 0xc1, 0xbe, 0xe2, 0x2e, 0x40, 0x9f, 0x96,
+                                      0xe9, 0x3d, 0x7e, 0x11, 0x73, 0x93, 0x17, 0x2a,
+                                      0xae, 0x2d, 0x8a, 0x57, 0x1e, 0x03, 0xac, 0x9c,
+                                      0x9e, 0xb7, 0x6f, 0xac, 0x45, 0xaf, 0x8e, 0x51};
+  const std::vector<ADP::SegmentCache::Chunk> chunks{{16, false}, {16, false}};
+  ADP::SegmentCache::Key cacheKey{
+      "segment.ts", {}, 1, 0, "key-uri", {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}};
+  const auto root = std::filesystem::temp_directory_path() /
+                    ("isa-hls-aes-test-" +
+                     std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+
+  for (const auto mode : {ADP::SegmentCache::Mode::MEMORY, ADP::SegmentCache::Mode::DISK})
+  {
+    ADP::SegmentCache cache{mode, 64, root};
+    ASSERT_TRUE(cache.IsAvailable());
+    cache.Put(cacheKey, encrypted, chunks);
+
+    if (mode == ADP::SegmentCache::Mode::DISK)
+    {
+      const auto sessionDirectory = *std::filesystem::directory_iterator(root);
+      const auto file = *std::filesystem::directory_iterator(sessionDirectory.path());
+      std::ifstream stored(file.path(), std::ios::binary);
+      const std::vector<uint8_t> storedBytes{std::istreambuf_iterator<char>(stored), {}};
+      EXPECT_EQ(storedBytes, encrypted);
+    }
+
+    std::vector<uint8_t> cachedData;
+    std::vector<ADP::SegmentCache::Chunk> cachedChunks;
+    ASSERT_TRUE(cache.Get(cacheKey, cachedData, &cachedChunks));
+    ASSERT_EQ(cachedChunks, chunks);
+
+    std::optional<CAesKeyInfo> aesKey{CAesKeyInfo{{0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6,
+                                                   0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf, 0x4f, 0x3c},
+                                                  cacheKey.iv,
+                                                  cacheKey.keyUrl}};
+    uint8_t iv[16]{};
+    std::vector<uint8_t> replayed;
+    size_t offset{0};
+    for (const auto& chunk : cachedChunks)
+    {
+      std::vector<uint8_t> output;
+      tree->OnDataArrived(cacheKey.number, aesKey, iv, cachedData.data() + offset, chunk.size,
+                          output, replayed.size(), chunk.isLast);
+      replayed.insert(replayed.end(), output.begin(), output.end());
+      offset += chunk.size;
+    }
+    EXPECT_EQ(replayed, expected);
+  }
+  std::filesystem::remove(root);
 }

@@ -35,11 +35,27 @@ public:
     std::map<std::string, std::string> headers;
     uint64_t number;
     uint64_t startPts;
+    std::string keyUrl;
+    std::vector<uint8_t> iv;
+    std::string periodId;
+    uint32_t periodSequence{0};
 
     bool operator==(const Key& other) const
     {
       return url == other.url && headers == other.headers && number == other.number &&
-             startPts == other.startPts;
+             startPts == other.startPts && keyUrl == other.keyUrl && iv == other.iv &&
+             periodId == other.periodId && periodSequence == other.periodSequence;
+    }
+  };
+
+  struct Chunk
+  {
+    size_t size;
+    bool isLast;
+
+    bool operator==(const Chunk& other) const
+    {
+      return size == other.size && isLast == other.isLast;
     }
   };
 
@@ -50,8 +66,9 @@ public:
   SegmentCache& operator=(const SegmentCache&) = delete;
 
   bool IsAvailable() const { return m_available; }
-  bool Get(const Key& key, std::vector<uint8_t>& data);
-  void Put(Key key, std::vector<uint8_t> data);
+  size_t MaxBytes() const { return m_maxBytes; }
+  bool Get(const Key& key, std::vector<uint8_t>& data, std::vector<Chunk>* chunks = nullptr);
+  void Put(Key key, std::vector<uint8_t> data, std::vector<Chunk> chunks = {});
 
 private:
   struct Entry
@@ -59,6 +76,7 @@ private:
     Key key;
     size_t size;
     std::vector<uint8_t> data;
+    std::vector<Chunk> chunks;
     std::filesystem::path path;
   };
 

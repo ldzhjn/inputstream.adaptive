@@ -99,7 +99,7 @@ void SegmentCache::Erase(std::list<Entry>::iterator entry)
   m_entries.erase(entry);
 }
 
-bool SegmentCache::Get(const Key& key, std::vector<uint8_t>& data)
+bool SegmentCache::Get(const Key& key, std::vector<uint8_t>& data, std::vector<Chunk>* chunks)
 {
   if (!m_available)
     return false;
@@ -133,13 +133,27 @@ bool SegmentCache::Get(const Key& key, std::vector<uint8_t>& data)
     }
   }
 
+  if (chunks)
+    *chunks = entry->chunks;
   m_entries.splice(m_entries.begin(), m_entries, entry);
   return true;
 }
 
-void SegmentCache::Put(Key key, std::vector<uint8_t> data)
+void SegmentCache::Put(Key key, std::vector<uint8_t> data, std::vector<Chunk> chunks)
 {
   if (!m_available || data.empty() || data.size() > m_maxBytes)
+    return;
+
+  if (chunks.empty())
+    chunks.push_back({data.size(), false});
+  size_t chunkBytes{0};
+  for (const auto& chunk : chunks)
+  {
+    if (chunk.size > data.size() - chunkBytes)
+      return;
+    chunkBytes += chunk.size;
+  }
+  if (chunkBytes != data.size())
     return;
 
   std::lock_guard lock(m_mutex);
@@ -150,7 +164,7 @@ void SegmentCache::Put(Key key, std::vector<uint8_t> data)
   while (m_sizeBytes + data.size() > m_maxBytes)
     Erase(std::prev(m_entries.end()));
 
-  Entry entry{std::move(key), data.size(), {}, {}};
+  Entry entry{std::move(key), data.size(), {}, std::move(chunks), {}};
   if (m_mode == Mode::MEMORY)
   {
     entry.data = std::move(data);

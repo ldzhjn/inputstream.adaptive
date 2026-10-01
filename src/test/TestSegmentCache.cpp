@@ -50,6 +50,14 @@ TEST(SegmentCache, SeparatesRangesAndSegmentTimestamps)
   differentTime.startPts = 200;
   EXPECT_FALSE(cache.Get(differentTime, bytes));
 
+  auto differentKey = key;
+  differentKey.keyUrl = "new-key";
+  EXPECT_FALSE(cache.Get(differentKey, bytes));
+
+  auto differentPeriod = key;
+  differentPeriod.periodSequence = 1;
+  EXPECT_FALSE(cache.Get(differentPeriod, bytes));
+
   EXPECT_TRUE(cache.Get(key, bytes));
   EXPECT_EQ(bytes, (std::vector<uint8_t>{1, 2, 3, 4}));
   cache.Put(differentTime, std::vector<uint8_t>(9, 0));
@@ -65,14 +73,16 @@ TEST(SegmentCache, DiskEntriesEvictAndDisappearOnClose)
   SegmentCache::Key second{"audio-1", {}, 1, 100};
   SegmentCache::Key third{"video-2", {}, 2, 200};
   std::vector<uint8_t> bytes;
+  std::vector<SegmentCache::Chunk> chunks;
 
   {
     SegmentCache cache{SegmentCache::Mode::DISK, 6, root};
     ASSERT_TRUE(cache.IsAvailable());
-    cache.Put(first, {1, 2, 3});
+    cache.Put(first, {1, 2, 3}, {{1, false}, {2, true}});
     cache.Put(second, {4, 5, 6});
-    ASSERT_TRUE(cache.Get(first, bytes));
+    ASSERT_TRUE(cache.Get(first, bytes, &chunks));
     EXPECT_EQ(bytes, (std::vector<uint8_t>{1, 2, 3}));
+    EXPECT_EQ(chunks, (std::vector<SegmentCache::Chunk>{{1, false}, {2, true}}));
     cache.Put(third, {7, 8, 9});
     EXPECT_FALSE(cache.Get(second, bytes));
     ASSERT_TRUE(cache.Get(third, bytes));

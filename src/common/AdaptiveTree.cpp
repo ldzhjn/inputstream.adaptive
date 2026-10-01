@@ -120,7 +120,8 @@ namespace adaptive
 
     // The cache belongs to the playback session, not to an individual audio or
     // video worker. This makes the configured size a total limit for all tracks.
-    if (m_isLive && GetTreeType() == TreeType::DASH && !m_segmentCache)
+    if (m_isLive && (GetTreeType() == TreeType::DASH || GetTreeType() == TreeType::HLS) &&
+        !m_segmentCache)
     {
       const auto& settings = CSrvBroker::GetSettings();
       const std::string mode = settings.GetSegmentCacheMode();
@@ -134,7 +135,7 @@ namespace adaptive
             cacheMode, maxBytes, mode == "disk" ? settings.GetSegmentCachePath() : "");
         if (!m_segmentCache->IsAvailable())
         {
-          LOG::Log(LOGERROR, "Cannot initialize live DASH segment cache");
+          LOG::Log(LOGERROR, "Cannot initialize live segment cache");
           m_segmentCache.reset();
         }
       }

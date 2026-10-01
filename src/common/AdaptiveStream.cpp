@@ -40,7 +40,8 @@ uint32_t adaptive::AdaptiveStream::globalClsId = 0;
 adaptive::AdaptiveStream::AdaptiveStream(AdaptiveTree* tree,
                                          PLAYLIST::CAdaptationSet* adp,
                                          PLAYLIST::CRepresentation* initialRepr)
-  : m_tree(tree),
+  : m_segmentCache(adp->GetStreamType() == StreamType::VIDEO ? 32 * 1024 * 1024 : 8 * 1024 * 1024),
+    m_tree(tree),
     current_period_(m_tree->m_currentPeriod),
     current_adp_(adp),
     current_rep_(initialRepr),
@@ -104,6 +105,35 @@ bool adaptive::AdaptiveStream::DownloadImpl(const DownloadInfo& downloadInfo,
 
   // Append stream parameters
   URL::AppendParameters(url, m_streamParams);
+
+  // Keep replay within the manifest seek window, but avoid fetching previously
+  // downloaded media again when the player seeks backward and then forward.
+  const bool useCache = !downloadData && downloadInfo.m_segmentBuffer && m_tree->IsLive() &&
+                        m_tree->GetTreeType() == TreeType::DASH &&
+                        !downloadInfo.m_segmentBuffer->segment.IsInitialization();
+  ADP::SegmentMemoryCache::Key cacheKey{url, headers, 0, 0};
+  bool canStore = false;
+  if (useCache)
+  {
+    const auto& segment = downloadInfo.m_segmentBuffer->segment;
+    cacheKey.number = segment.m_number;
+    cacheKey.startPts = segment.startPTS_;
+    // A failed attempt can leave partial bytes in the destination buffer.
+    canStore = downloadInfo.m_segmentBuffer->BufferSize() == 0;
+    if (canStore)
+    {
+      std::vector<uint8_t> cachedData;
+      if (m_segmentCache.Get(cacheKey, cachedData))
+      {
+        if (thread_data_->State() == THREADDATA::ThState::STOPPED)
+          return false;
+        downloadInfo.m_segmentBuffer->AppendBuffer(cachedData);
+        thread_data_->cvRW.notify_all();
+        LOG::LogF(LOGDEBUG, "[AS-%u] Reused %zu cached segment bytes", clsId, cachedData.size());
+        return true;
+      }
+    }
+  }
 
   CURL::CUrl curl{url};
   curl.AddHeaders(headers);
@@ -187,6 +217,8 @@ bool adaptive::AdaptiveStream::DownloadImpl(const DownloadInfo& downloadInfo,
         LOG::Log(LOGDEBUG,
                  "[AS-%u] Download finished: %s (downloaded %zu byte, speed %0.2lf byte/s)", clsId,
                  url.c_str(), totalBytesRead, downloadSpeed);
+        if (useCache && canStore && thread_data_->State() != THREADDATA::ThState::STOPPED)
+          m_segmentCache.Put(std::move(cacheKey), downloadInfo.m_segmentBuffer->ReadBuffer());
         return true;
       }
     }

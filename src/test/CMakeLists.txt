@@ -9,6 +9,7 @@ add_executable(${BINARY}
     TestDASHTree.cpp
     TestHLSTree.cpp
     TestSmoothTree.cpp
+    TestSegmentMemoryCache.cpp
     TestHelper.cpp
     TestUtils.cpp
     ../aes_decrypter.cpp

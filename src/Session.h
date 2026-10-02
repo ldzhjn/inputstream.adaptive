@@ -254,7 +254,7 @@ protected:
   /*!
    * \brief Get the media duration in ms, based on segments.
    */
-  uint64_t GetMediaDurationMs();
+  uint64_t GetMediaDurationMs() const;
 
 private:
   DRM::CDRMEngine m_drmEngine;
@@ -269,6 +269,7 @@ private:
   uint64_t m_elapsedTime{0};
   uint64_t m_chapterStartTime{0}; // In STREAM_TIME_BASE
   double m_chapterSeekTime{0.0}; // In seconds
+  bool m_chapterSeekPending{false};
   uint8_t m_mediaTypeMask{0};
 
   //! @todo: the InputStream API method GetChapterName returns a "const char*" whose

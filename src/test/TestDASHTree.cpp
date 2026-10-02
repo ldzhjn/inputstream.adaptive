@@ -16,7 +16,59 @@
 
 #include <gtest/gtest.h>
 
+#include <memory>
+
 using namespace UTILS;
+
+TEST(DashCacheTimeline, RestoresDownloadedHistoryAndDropsEvictedStart)
+{
+  DASHTestTree tree;
+  auto cache = std::make_shared<ADP::SegmentCache>(ADP::SegmentCache::Mode::MEMORY, 4);
+  tree.SetSegmentCacheForTest(cache);
+
+  PLAYLIST::CPeriod period;
+  period.SetId("period");
+  period.SetStart(0);
+  PLAYLIST::CAdaptationSet adp{&period};
+  adp.SetId("video");
+  PLAYLIST::CRepresentation rep{&adp};
+  rep.SetId("720p");
+  rep.SetTimescale(1000);
+
+  auto addCached = [&](uint64_t number, uint64_t start)
+  {
+    ADP::SegmentCache::Key key{"segment-" + std::to_string(number), {}, number, start};
+    key.periodId = "period";
+    key.periodStart = 0;
+    key.adaptationId = "video";
+    key.representationId = "720p";
+    PLAYLIST::CSegment segment;
+    segment.m_number = number;
+    segment.startPTS_ = start;
+    segment.m_endPts = start + 6;
+    cache->Put(key, {1, 2}, {}, segment);
+  };
+  PLAYLIST::CSegment manifestSegment;
+  manifestSegment.m_number = 3;
+  manifestSegment.startPTS_ = 112;
+  manifestSegment.m_endPts = 118;
+  rep.Timeline().Add(manifestSegment);
+
+  addCached(1, 100);
+  addCached(2, 106);
+  tree.RestoreCachedSegments(&period, &adp, &rep);
+  ASSERT_EQ(rep.Timeline().GetSize(), 3U);
+  EXPECT_EQ(rep.Timeline().FindByPTSOrNext(101)->m_number, 1U);
+  EXPECT_EQ(rep.Timeline().GetBack()->m_number, 3U);
+
+  // The oldest entry has gone: a new manifest must not offer it for seek.
+  addCached(4, 118);
+  rep.Timeline().Clear();
+  rep.Timeline().Add(manifestSegment);
+  tree.RestoreCachedSegments(&period, &adp, &rep);
+  ASSERT_EQ(rep.Timeline().GetSize(), 2U);
+  EXPECT_EQ(rep.Timeline().GetFront()->m_number, 2U);
+}
 
 class DASHTreeTest : public ::testing::Test
 {
@@ -275,6 +327,30 @@ TEST_F(DASHTreeTest, CalculateCorrectSegmentNumbersFromSegmentTimeline)
   EXPECT_EQ(segments.GetSize(), 13);
   EXPECT_EQ(segments.Get(0)->m_number, 487050);
   EXPECT_EQ(segments.Get(12)->m_number, 487062);
+}
+
+TEST_F(DASHTreeAdaptiveStreamTest, CachedLiveTimelineIncludesInitialServerWindow)
+{
+  OpenTestFile("mpd/segtimeline_live_pd.mpd");
+  tree->SetSegmentCacheForTest(
+      std::make_shared<ADP::SegmentCache>(ADP::SegmentCache::Mode::MEMORY, 1024));
+
+  auto* adp = tree->m_currentPeriod->GetAdaptationSets()[0].get();
+  auto* rep = adp->GetRepresentations()[0].get();
+  ASSERT_GT(rep->Timeline().GetSize(), 1U);
+  SetTestStream(NewStream(adp, rep));
+  ASSERT_TRUE(testStream->start_stream());
+  ASSERT_TRUE(rep->current_segment_.has_value());
+  EXPECT_GT(rep->current_segment_->startPTS_, rep->Timeline().GetFront()->startPTS_);
+
+  const uint64_t firstPts =
+      rep->Timeline().GetFront()->startPTS_ * rep->timescale_ext_ / rep->timescale_int_;
+  const uint64_t lastPts =
+      rep->Timeline().GetBack()->m_endPts / rep->GetTimescale() * 1000000 +
+      rep->Timeline().GetBack()->m_endPts % rep->GetTimescale() * 1000000 / rep->GetTimescale();
+  EXPECT_TRUE(tree->IsLive());
+  EXPECT_EQ(tree->GetCachePlaybackStartPts(), firstPts);
+  EXPECT_EQ(tree->GetCachedLiveDurationMs(), (lastPts - firstPts) / 1000);
 }
 
 TEST_F(DASHTreeTest, CalculateCorrectSegmentNumbersFromSegmentTemplateWithOldPublishTime)

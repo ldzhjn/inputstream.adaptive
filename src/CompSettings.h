@@ -70,6 +70,10 @@ public:
 
   int GetMediaType() const;
 
+  std::string GetSegmentCacheMode() const;
+  uint32_t GetSegmentCacheSizeMiB() const;
+  std::string GetSegmentCachePath() const;
+
   bool IsDisableSecureDecoder() const;
   std::string GetDecrypterPath() const; // Widevine decrypter binary path
 

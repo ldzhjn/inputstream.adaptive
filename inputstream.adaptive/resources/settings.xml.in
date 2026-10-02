@@ -207,6 +207,50 @@
       </group>
     </category>
     <category id="expert" label="30120">
+      <group id="segmentcache" label="30244">
+        <setting id="adaptivestream.cache.mode" type="string" label="30245" help="30246">
+          <level>1</level>
+          <default>off</default>
+          <constraints>
+            <options>
+              <option label="30247">off</option>
+              <option label="30248">memory</option>
+              <option label="30249">disk</option>
+            </options>
+          </constraints>
+          <control type="spinner" format="string" />
+        </setting>
+        <setting id="adaptivestream.cache.size" type="integer" parent="adaptivestream.cache.mode" label="30250" help="30251">
+          <level>1</level>
+          <default>32</default>
+          <constraints>
+            <minimum>1</minimum>
+            <step>1</step>
+            <maximum>2048</maximum>
+          </constraints>
+          <dependencies>
+            <dependency type="visible">
+              <or>
+                <condition setting="adaptivestream.cache.mode">memory</condition>
+                <condition setting="adaptivestream.cache.mode">disk</condition>
+              </or>
+            </dependency>
+          </dependencies>
+          <control type="edit" format="integer"><heading>30250</heading></control>
+        </setting>
+        <setting id="adaptivestream.cache.path" type="path" parent="adaptivestream.cache.mode" label="30252" help="30253">
+          <level>1</level>
+          <default>special://userdata/addon_data/inputstream.adaptive/segment_cache</default>
+          <constraints>
+            <allowempty>false</allowempty>
+            <writable>true</writable>
+          </constraints>
+          <dependencies>
+            <dependency type="visible" setting="adaptivestream.cache.mode">disk</dependency>
+          </dependencies>
+          <control type="button" format="path"><heading>657</heading></control>
+        </setting>
+      </group>
       <group id="misc">
         <setting id="ASSUREDBUFFERDURATION" type="integer" label="30200" help="30167">
           <level>1</level>

@@ -33,6 +33,8 @@ namespace adaptive
     m_manifestParams = left.m_manifestParams;
     m_manifestHeaders = left.m_manifestHeaders;
     m_settings = left.m_settings;
+    m_segmentCache = left.m_segmentCache;
+    m_cachePlaybackStartPts.store(left.m_cachePlaybackStartPts.load());
     m_pathSaveManifest = left.m_pathSaveManifest;
     stream_start_ = left.stream_start_;
 
@@ -117,6 +119,35 @@ namespace adaptive
     SortTree();
     OverrideStreamsMediaFlags(m_periods);
 
+    // The cache belongs to the playback session, not to an individual audio or
+    // video worker. This makes the configured size a total limit for all tracks.
+    if (m_isLive && (GetTreeType() == TreeType::DASH || GetTreeType() == TreeType::HLS) &&
+        !m_segmentCache)
+    {
+      const auto& settings = CSrvBroker::GetSettings();
+      const std::string mode = settings.GetSegmentCacheMode();
+      LOG::Log(LOGINFO, "Live segment cache setting: mode=%s, size=%u MiB", mode.c_str(),
+               settings.GetSegmentCacheSizeMiB());
+      if (mode == "memory" || mode == "disk")
+      {
+        const auto cacheMode =
+            mode == "disk" ? ADP::SegmentCache::Mode::DISK : ADP::SegmentCache::Mode::MEMORY;
+        const size_t maxBytes =
+            static_cast<size_t>(settings.GetSegmentCacheSizeMiB()) * 1024 * 1024;
+        m_segmentCache = std::make_shared<ADP::SegmentCache>(
+            cacheMode, maxBytes, mode == "disk" ? settings.GetSegmentCachePath() : "");
+        if (!m_segmentCache->IsAvailable())
+        {
+          LOG::Log(LOGERROR, "Cannot initialize live segment cache");
+          m_segmentCache.reset();
+        }
+        else
+        {
+          LOG::Log(LOGINFO, "Live segment cache ready: mode=%s", mode.c_str());
+        }
+      }
+    }
+
     // A manifest can provide live delay value, if not so we use our default
     // value of 16 secs, this is needed to ensure an appropriate playback,
     // an add-on can override the delay to try fix edge use cases
@@ -147,6 +178,75 @@ namespace adaptive
                                    bool isLastChunk)
   {
     segBuffer.insert(segBuffer.end(), srcData, srcData + srcDataSize);
+  }
+
+  void AdaptiveTree::RestoreCachedSegments(PLAYLIST::CPeriod* period,
+                                           PLAYLIST::CAdaptationSet* adp,
+                                           PLAYLIST::CRepresentation* rep)
+  {
+    if (!m_segmentCache || !period || !adp || !rep)
+      return;
+
+    auto cached = m_segmentCache->GetSegments(period->GetStart(), period->GetId(),
+                                              period->GetSequence(), adp->GetId(), rep->GetId());
+    if (cached.empty())
+      return;
+
+    auto& timeline = rep->Timeline();
+    const auto* firstManifestSegment = timeline.GetFront();
+    uint64_t expectedStart =
+        firstManifestSegment ? firstManifestSegment->startPTS_ : cached.back().m_endPts;
+    const uint64_t tolerance = rep->GetTimescale() / 4;
+    std::vector<PLAYLIST::CSegment> retained;
+    for (auto it = cached.rbegin(); it != cached.rend(); ++it)
+    {
+      if (firstManifestSegment && it->startPTS_ >= firstManifestSegment->startPTS_)
+        continue;
+      if (it->m_endPts > expectedStart + tolerance)
+        continue;
+      if (it->m_endPts + tolerance < expectedStart)
+        break; // An evicted or never-downloaded segment interrupts the replay path.
+      retained.push_back(*it);
+      expectedStart = it->startPTS_;
+    }
+    if (retained.empty())
+      return;
+
+    PLAYLIST::CSegContainer merged;
+    for (auto it = retained.rbegin(); it != retained.rend(); ++it)
+      merged.Add(*it);
+    for (const auto& segment : timeline)
+      merged.Add(segment);
+    timeline.Swap(merged);
+  }
+
+  uint64_t AdaptiveTree::GetCachedLiveDurationMs() const
+  {
+    constexpr uint64_t ptsPerSecond = 1000000;
+    const uint64_t playbackStartPts = m_cachePlaybackStartPts.load();
+    if (playbackStartPts == PLAYLIST::NO_VALUE)
+      return m_totalTime;
+    uint64_t latestPts = playbackStartPts;
+    for (const auto& period : m_periods)
+    {
+      for (const auto& adp : period->GetAdaptationSets())
+      {
+        if (adp->GetStreamType() != StreamType::VIDEO && adp->GetStreamType() != StreamType::AUDIO &&
+            adp->GetStreamType() != StreamType::VIDEO_AUDIO)
+          continue;
+        for (const auto& rep : adp->GetRepresentations())
+        {
+          const auto* last = rep->Timeline().GetBack();
+          const uint64_t scale = rep->GetTimescale();
+          if (!last || scale == 0 || last->m_endPts == PLAYLIST::NO_PTS_VALUE)
+            continue;
+          const uint64_t endPts = (last->m_endPts / scale) * ptsPerSecond +
+                                  (last->m_endPts % scale) * ptsPerSecond / scale;
+          latestPts = std::max(latestPts, endPts);
+        }
+      }
+    }
+    return (latestPts - playbackStartPts) / 1000;
   }
 
   void AdaptiveTree::OverrideStreamsMediaFlags(

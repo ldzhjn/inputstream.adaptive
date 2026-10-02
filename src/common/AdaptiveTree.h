@@ -11,6 +11,7 @@
 #include "AdaptationSet.h"
 #include "Period.h"
 #include "Representation.h"
+#include "SegmentCache.h"
 
 #include <atomic>
 #include <chrono>
@@ -22,6 +23,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #ifdef INPUTSTREAM_TEST_BUILD
@@ -66,7 +68,8 @@ public:
   std::string manifest_url_;
   std::string base_url_;
 
-  uint64_t m_totalTime{0}; // Total playing time in ms (can include all periods/chapters or timeshift)
+  uint64_t m_totalTime{
+      0}; // Total playing time in ms (can include all periods/chapters or timeshift)
   uint64_t stream_start_{0}; // in ms
   uint64_t available_time_{0}; // in ms
   uint64_t m_liveDelay{0}; // Apply a delay in seconds from the live edge
@@ -241,6 +244,24 @@ public:
    * \return True for live streaming content, otherwise false for VOD content
    */
   bool IsLive() const { return m_isLive; }
+  ADP::SegmentCache* GetSegmentCache() const { return m_segmentCache.get(); }
+#ifdef INPUTSTREAM_TEST_BUILD
+  void SetSegmentCacheForTest(std::shared_ptr<ADP::SegmentCache> cache)
+  {
+    m_segmentCache = std::move(cache);
+  }
+#endif
+  uint64_t GetOrSetCachePlaybackStartPts(uint64_t proposedPts)
+  {
+    uint64_t unset{PLAYLIST::NO_VALUE};
+    m_cachePlaybackStartPts.compare_exchange_strong(unset, proposedPts);
+    return m_cachePlaybackStartPts.load();
+  }
+  uint64_t GetCachePlaybackStartPts() const { return m_cachePlaybackStartPts.load(); }
+  uint64_t GetCachedLiveDurationMs() const;
+  void RestoreCachedSegments(PLAYLIST::CPeriod* period,
+                             PLAYLIST::CAdaptationSet* adp,
+                             PLAYLIST::CRepresentation* rep);
 
   /*!
    * \brief Determines if a live manifest needs updates when new segments are requested
@@ -256,15 +277,18 @@ public:
     return m_isLive && m_updateInterval != PLAYLIST::NO_VALUE && m_updateInterval > 0;
   }
 
-  const std::chrono::time_point<std::chrono::system_clock> GetLastUpdated() const { return lastUpdated_; };
+  const std::chrono::time_point<std::chrono::system_clock> GetLastUpdated() const
+  {
+    return lastUpdated_;
+  };
 
   CHOOSER::IRepresentationChooser* GetRepChooser() { return m_reprChooser; }
 
   int SecondsSinceRepUpdate(PLAYLIST::CRepresentation* rep)
   {
-    return static_cast<int>(
-      std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now() - GetRepLastUpdated(rep))
-      .count());
+    return static_cast<int>(std::chrono::duration_cast<std::chrono::seconds>(
+                                std::chrono::system_clock::now() - GetRepLastUpdated(rep))
+                                .count());
   }
 
   virtual AdaptiveTree* Clone() const = 0;
@@ -423,7 +447,8 @@ protected:
   // Value 0: refresh each time we need to make new segments
   std::atomic<uint64_t> m_updateInterval{PLAYLIST::NO_VALUE};
   TreeUpdateThread m_updThread;
-  std::atomic<std::chrono::time_point<std::chrono::system_clock>> lastUpdated_{std::chrono::system_clock::now()};
+  std::atomic<std::chrono::time_point<std::chrono::system_clock>> lastUpdated_{
+      std::chrono::system_clock::now()};
 
   // Optionals URL parameters to add to the manifest update requests
   std::string m_manifestUpdParams;
@@ -438,6 +463,8 @@ protected:
   bool m_isReqPrepareStream{false};
 
 private:
+  std::shared_ptr<ADP::SegmentCache> m_segmentCache;
+  std::atomic<uint64_t> m_cachePlaybackStartPts{PLAYLIST::NO_VALUE};
   std::shared_ptr<const ChaptersSnapshot> m_chaptersSnapshot{
       std::make_shared<const ChaptersSnapshot>()};
   // Guards the m_chaptersSnapshot pointer only, never held while doing any work

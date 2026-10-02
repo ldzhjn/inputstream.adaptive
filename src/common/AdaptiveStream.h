@@ -14,8 +14,8 @@
 #include "samplereader/SampleReader.h"
 
 #include <atomic>
-#include <condition_variable>
 #include <chrono>
+#include <condition_variable>
 #include <map>
 #include <mutex>
 #include <string>
@@ -71,7 +71,7 @@ enum class EVENT_TYPE
      *        and that the relative sample reader is already stopped, to avoid data access violations.
      */
     void Dispose();
-    uint64_t getMaxTimeMs();
+    uint64_t getMaxTimeMs() const;
 
     void Disable();
 

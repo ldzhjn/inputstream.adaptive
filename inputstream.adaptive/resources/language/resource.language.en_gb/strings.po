@@ -353,7 +353,48 @@ msgctxt "#30243"
 msgid "Verbose debugging can be useful for debugging components, but in some cases it may expose sensitive information in the log."
 msgstr ""
 
-#empty strings reserved for settings from id 30244 to 30299
+#. Settings group for replaying previously downloaded live DASH and HLS segments
+msgctxt "#30244"
+msgid "Live segment cache"
+msgstr ""
+
+msgctxt "#30245"
+msgid "Cache mode"
+msgstr ""
+
+msgctxt "#30246"
+msgid "Keep downloaded live DASH or HLS segments seekable from the start of playback while they remain cached. Automatic quality switching is disabled for a continuous replay timeline."
+msgstr ""
+
+msgctxt "#30247"
+msgid "Disabled"
+msgstr ""
+
+msgctxt "#30248"
+msgid "Memory"
+msgstr ""
+
+msgctxt "#30249"
+msgid "Disk"
+msgstr ""
+
+msgctxt "#30250"
+msgid "Total cache size (MiB)"
+msgstr ""
+
+msgctxt "#30251"
+msgid "Maximum combined cache size for all audio and video tracks in one playback session."
+msgstr ""
+
+msgctxt "#30252"
+msgid "Disk cache folder"
+msgstr ""
+
+msgctxt "#30253"
+msgid "Choose a local writable folder. Cached segments are deleted when playback ends."
+msgstr ""
+
+#empty strings reserved for settings from id 30254 to 30299
 
 #. A GUI window title, "InputStream Adaptive" its the add-on name, not to be translated
 msgctxt "#30300"

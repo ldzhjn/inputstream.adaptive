@@ -126,6 +126,8 @@ namespace adaptive
     {
       const auto& settings = CSrvBroker::GetSettings();
       const std::string mode = settings.GetSegmentCacheMode();
+      LOG::Log(LOGINFO, "Live segment cache setting: mode=%s, size=%u MiB", mode.c_str(),
+               settings.GetSegmentCacheSizeMiB());
       if (mode == "memory" || mode == "disk")
       {
         const auto cacheMode =
@@ -138,6 +140,10 @@ namespace adaptive
         {
           LOG::Log(LOGERROR, "Cannot initialize live segment cache");
           m_segmentCache.reset();
+        }
+        else
+        {
+          LOG::Log(LOGINFO, "Live segment cache ready: mode=%s", mode.c_str());
         }
       }
     }

@@ -102,6 +102,32 @@ protected:
   CHOOSER::IRepresentationChooser* m_reprChooser{nullptr};
 };
 
+TEST_F(HLSTreeTest, CachedLiveTimelineIncludesInitialServerWindow)
+{
+  ASSERT_TRUE(OpenTestFileMaster("hls/1v_master.m3u8", "https://foo.bar/master.m3u8"));
+  auto* period = tree->m_currentPeriod;
+  auto* adp = tree->m_currentAdpSet;
+  auto* rep = tree->m_currentRepr;
+  ASSERT_TRUE(OpenTestFileVariant("hls/cache_live_window.m3u8",
+                                  "https://foo.bar/live/variant.m3u8", period, adp, rep));
+  ASSERT_GT(rep->Timeline().GetSize(), 1U);
+  tree->SetSegmentCacheForTest(
+      std::make_shared<ADP::SegmentCache>(ADP::SegmentCache::Mode::MEMORY, 1024));
+
+  TestAdaptiveStream stream{tree, adp, rep};
+  ASSERT_TRUE(stream.start_stream());
+  ASSERT_TRUE(rep->current_segment_.has_value());
+  EXPECT_GT(rep->current_segment_->startPTS_, rep->Timeline().GetFront()->startPTS_);
+
+  const uint64_t firstPts = rep->Timeline().GetFront()->startPTS_ * 1000000 /
+                            rep->GetTimescale();
+  const uint64_t lastPts = rep->Timeline().GetBack()->m_endPts * 1000000 /
+                           rep->GetTimescale();
+  EXPECT_TRUE(tree->IsLive());
+  EXPECT_EQ(tree->GetCachePlaybackStartPts(), firstPts);
+  EXPECT_EQ(tree->GetCachedLiveDurationMs(), (lastPts - firstPts) / 1000);
+}
+
 
 TEST_F(HLSTreeTest, CalculateSourceUrl)
 {

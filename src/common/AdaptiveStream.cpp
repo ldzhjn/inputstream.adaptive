@@ -842,9 +842,14 @@ bool adaptive::AdaptiveStream::start_stream()
         (next_segment->startPTS_ * current_rep_->timescale_ext_) / current_rep_->timescale_int_;
     if (m_tree->GetSegmentCache() && m_tree->IsLive())
     {
-      const CSegment* firstPlayedSegment = current_rep_->GetNextSegment();
+      // Keep the server's existing seek window before the live start segment.
+      // The cache extends this timeline as new segments arrive.
+      const CSegment* firstAvailableSegment = current_rep_->Timeline().GetFront();
       const uint64_t proposedPts =
-          ((firstPlayedSegment ? firstPlayedSegment : next_segment)->startPTS_ *
+          ((firstAvailableSegment && firstAvailableSegment->startPTS_ != NO_PTS_VALUE
+                ? firstAvailableSegment
+                : next_segment)
+               ->startPTS_ *
            current_rep_->timescale_ext_) /
           current_rep_->timescale_int_;
       absolutePTSOffset_ = m_tree->GetOrSetCachePlaybackStartPts(proposedPts);

@@ -329,6 +329,30 @@ TEST_F(DASHTreeTest, CalculateCorrectSegmentNumbersFromSegmentTimeline)
   EXPECT_EQ(segments.Get(12)->m_number, 487062);
 }
 
+TEST_F(DASHTreeAdaptiveStreamTest, CachedLiveTimelineIncludesInitialServerWindow)
+{
+  OpenTestFile("mpd/segtimeline_live_pd.mpd");
+  tree->SetSegmentCacheForTest(
+      std::make_shared<ADP::SegmentCache>(ADP::SegmentCache::Mode::MEMORY, 1024));
+
+  auto* adp = tree->m_currentPeriod->GetAdaptationSets()[0].get();
+  auto* rep = adp->GetRepresentations()[0].get();
+  ASSERT_GT(rep->Timeline().GetSize(), 1U);
+  SetTestStream(NewStream(adp, rep));
+  ASSERT_TRUE(testStream->start_stream());
+  ASSERT_TRUE(rep->current_segment_.has_value());
+  EXPECT_GT(rep->current_segment_->startPTS_, rep->Timeline().GetFront()->startPTS_);
+
+  const uint64_t firstPts =
+      rep->Timeline().GetFront()->startPTS_ * rep->timescale_ext_ / rep->timescale_int_;
+  const uint64_t lastPts =
+      rep->Timeline().GetBack()->m_endPts / rep->GetTimescale() * 1000000 +
+      rep->Timeline().GetBack()->m_endPts % rep->GetTimescale() * 1000000 / rep->GetTimescale();
+  EXPECT_TRUE(tree->IsLive());
+  EXPECT_EQ(tree->GetCachePlaybackStartPts(), firstPts);
+  EXPECT_EQ(tree->GetCachedLiveDurationMs(), (lastPts - firstPts) / 1000);
+}
+
 TEST_F(DASHTreeTest, CalculateCorrectSegmentNumbersFromSegmentTemplateWithOldPublishTime)
 {
   tree->SetNowTime(1617229334000);

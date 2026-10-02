@@ -920,9 +920,16 @@ bool SESSION::CSession::SeekTime(double seekTime, bool& isError)
               const CSegment* first = rep->Timeline().GetFront();
               const CSegment* last = rep->Timeline().GetBack();
               const uint64_t scale = rep->GetTimescale();
+              // DASH segment timestamps can contain an epoch-sized period offset.
+              // Divide before multiplying so the conversion does not overflow.
+              const auto toStreamPts = [scale](uint64_t pts)
+              {
+                return (pts / scale) * STREAM_TIME_BASE +
+                       (pts % scale) * STREAM_TIME_BASE / scale;
+              };
               if (first && last && scale > 0 &&
-                  targetPts >= first->startPTS_ * STREAM_TIME_BASE / scale &&
-                  targetPts <= last->m_endPts * STREAM_TIME_BASE / scale)
+                  targetPts >= toStreamPts(first->startPTS_) &&
+                  targetPts <= toStreamPts(last->m_endPts))
                 return true;
             }
           }

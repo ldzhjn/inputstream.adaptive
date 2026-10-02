@@ -272,7 +272,8 @@ void adaptive::CDashTree::ParseTagMPDAttribs(pugi::xml_node nodeMPD)
 
   std::string timeShiftBufferDepthStr;
   if (XML::QueryAttrib(nodeMPD, "timeShiftBufferDepth", timeShiftBufferDepthStr))
-    m_timeShiftBufferDepth = static_cast<uint64_t>(XML::ParseDuration(timeShiftBufferDepthStr) * 1000);
+    m_timeShiftBufferDepth =
+        static_cast<uint64_t>(XML::ParseDuration(timeShiftBufferDepthStr) * 1000);
 
   std::string availabilityStartTimeStr;
   if (XML::QueryAttrib(nodeMPD, "availabilityStartTime", availabilityStartTimeStr))
@@ -311,13 +312,15 @@ void adaptive::CDashTree::ParseTagPeriod(pugi::xml_node nodePeriod, const std::s
     // on subsequent periods it can be determined
     if (m_periods.empty())
     {
-      LOG::LogF(LOGWARNING, "Period ID \"%s\" has no \"start\" attribute, assumed 0.", period->GetId().c_str());
+      LOG::LogF(LOGWARNING, "Period ID \"%s\" has no \"start\" attribute, assumed 0.",
+                period->GetId().c_str());
       period->SetStart(available_time_);
     }
     else
     {
       auto& lastPeriod = m_periods.back();
-      uint64_t pStartMs = lastPeriod->GetStart() + (lastPeriod->GetDuration() * 1000 / lastPeriod->GetTimescale());
+      uint64_t pStartMs =
+          lastPeriod->GetStart() + (lastPeriod->GetDuration() * 1000 / lastPeriod->GetTimescale());
       period->SetStart(pStartMs);
     }
   }
@@ -1067,7 +1070,7 @@ void adaptive::CDashTree::ParseTagRepresentation(pugi::xml_node nodeRepr,
     period->SetTlDuration(period->GetDuration());
   }
   if (!repr->HasSegmentBase() && (adpSet->GetStreamType() == StreamType::VIDEO ||
-      adpSet->GetStreamType() == StreamType::AUDIO))
+                                  adpSet->GetStreamType() == StreamType::AUDIO))
   {
     if (repr->GetTimescale() == 0)
     {
@@ -1208,7 +1211,8 @@ void adaptive::CDashTree::ParseTagContentProtection(
       {
         protScheme.pssh = node.child_value();
       }
-      else if (StringUtils::EndsWithNoCase(childName, "laurl")) // e.g. <clearkey:Laurl> or <dashif:Laurl> ...
+      else if (StringUtils::EndsWithNoCase(childName,
+                                           "laurl")) // e.g. <clearkey:Laurl> or <dashif:Laurl> ...
       {
         protScheme.licenseUrl = node.child_value();
       }
@@ -1413,7 +1417,8 @@ int64_t adaptive::CDashTree::ResolveUTCTiming(pugi::xml_node node)
   // Parse <UTCTiming> child tags
   for (xml_node nodeUTC : node.children("UTCTiming"))
   {
-    utcTimings.emplace_back(XML::GetAttrib(nodeUTC, "schemeIdUri"), XML::GetAttrib(nodeUTC, "value"));
+    utcTimings.emplace_back(XML::GetAttrib(nodeUTC, "schemeIdUri"),
+                            XML::GetAttrib(nodeUTC, "value"));
   }
 
   std::optional<int64_t> tsMs;
@@ -1448,21 +1453,20 @@ int64_t adaptive::CDashTree::ResolveUTCTiming(pugi::xml_node node)
       tsMs = static_cast<int64_t>(ts * 1000);
       break;
     }
-    else if (scheme == "urn:mpeg:dash:utc:direct:2014" ||
-             scheme == "urn:mpeg:dash:utc:direct:2012")
+    else if (scheme == "urn:mpeg:dash:utc:direct:2014" || scheme == "urn:mpeg:dash:utc:direct:2012")
     {
       const double ts = XML::ParseDate(value.c_str(), 0);
       if (ts == 0)
       {
-        LOG::LogF(LOGERROR, "A problem occurred in the UTCTiming scheme \"%s\" parsing", scheme.c_str());
+        LOG::LogF(LOGERROR, "A problem occurred in the UTCTiming scheme \"%s\" parsing",
+                  scheme.c_str());
         continue;
       }
       tsMs = static_cast<int64_t>(ts * 1000);
       break;
     }
     else if (scheme == "urn:mpeg:dash:utc:http-ntp:2014" ||
-             scheme == "urn:mpeg:dash:utc:ntp:2014" ||
-             scheme == "urn:mpeg:dash:utc:sntp:2014")
+             scheme == "urn:mpeg:dash:utc:ntp:2014" || scheme == "urn:mpeg:dash:utc:sntp:2014")
     {
       LOG::Log(LOGDEBUG, "NTP UTCTiming scheme \"%s\" not supported", scheme.c_str());
     }
@@ -1611,9 +1615,9 @@ void adaptive::CDashTree::OnUpdateSegments()
     // The periods mapping between local MPD data and the MPD update is done by using period "start" attribute,
     // since the "start" attribute is mandatory and must not change over MPD updates
 
-    auto itPeriod = std::find_if(
-        m_periods.begin(), m_periods.end(), [&updPeriod](const std::unique_ptr<CPeriod>& item)
-        { return item->GetStart() == updPeriod->GetStart(); });
+    auto itPeriod = std::find_if(m_periods.begin(), m_periods.end(),
+                                 [&updPeriod](const std::unique_ptr<CPeriod>& item)
+                                 { return item->GetStart() == updPeriod->GetStart(); });
 
     CPeriod* period{nullptr};
 
@@ -1653,15 +1657,19 @@ void adaptive::CDashTree::OnUpdateSegments()
         for (auto& updRepr : updAdpSet->GetRepresentations())
         {
           // Locate representation
-          auto itRepr = std::find_if(adpSet->GetRepresentations().begin(),
-                                      adpSet->GetRepresentations().end(),
-                                      [&updRepr](const std::unique_ptr<CRepresentation>& item)
-                                      { return item->GetId() == updRepr->GetId(); });
+          auto itRepr =
+              std::find_if(adpSet->GetRepresentations().begin(), adpSet->GetRepresentations().end(),
+                           [&updRepr](const std::unique_ptr<CRepresentation>& item)
+                           { return item->GetId() == updRepr->GetId(); });
 
           // Found representation
           if (itRepr != adpSet->GetRepresentations().end())
           {
             auto repr = (*itRepr).get();
+
+            // The update MPD omits expired segments. Keep only the contiguous
+            // downloaded prefix still held by this playback's cache.
+            RestoreCachedSegments(period, adpSet.get(), updRepr.get());
 
             if (!repr->GetSegmentTemplate()->HasTimeline() || repr->Timeline().IsEmpty())
             {
@@ -1673,6 +1681,11 @@ void adaptive::CDashTree::OnUpdateSegments()
             if (!repr->current_segment_.has_value()) // Representation not used for playback yet
             {
               repr->Timeline().Swap(updRepr->Timeline());
+
+              if (adpSet->GetStreamType() == StreamType::VIDEO ||
+                  adpSet->GetStreamType() == StreamType::AUDIO)
+                period->SetTlDuration(repr->Timeline().GetDuration() * period->GetTimescale() /
+                                      repr->GetTimescale());
 
               LOG::LogF(LOGDEBUG, "MPD update - Done (repr. id \"%s\", period id \"%s\")",
                         updRepr->GetId().c_str(), period->GetId().c_str());
@@ -1730,8 +1743,8 @@ void adaptive::CDashTree::OnUpdateSegments()
               if (adpSet->GetStreamType() == StreamType::VIDEO ||
                   adpSet->GetStreamType() == StreamType::AUDIO)
               {
-                const uint64_t tlDuration = updRepr->Timeline().GetDuration() *
-                                            period->GetTimescale() / updRepr->GetTimescale();
+                const uint64_t tlDuration =
+                    repr->Timeline().GetDuration() * period->GetTimescale() / repr->GetTimescale();
                 period->SetTlDuration(tlDuration);
               }
 
@@ -1754,7 +1767,9 @@ void adaptive::CDashTree::OnUpdateSegments()
         if (period.get() == m_currentPeriod)
           return false;
 
-        if (updatedPeriodStarts.find(period->GetStart()) == updatedPeriodStarts.end())
+        if (updatedPeriodStarts.find(period->GetStart()) == updatedPeriodStarts.end() &&
+            (!GetSegmentCache() || !GetSegmentCache()->HasPeriod(
+                                       period->GetStart(), period->GetId(), period->GetSequence())))
         {
           LOG::Log(LOGDEBUG, "Deleted period (ID: \"%s\", start: %llu)", period->GetId().c_str(),
                    period->GetStart());
@@ -1885,7 +1900,7 @@ void adaptive::CDashTree::InsertLiveSegment(PLAYLIST::CPeriod* currPeriod,
 
   for (auto& period : m_periods)
   {
-    const uint64_t periodStartMs = period->GetStart() == NO_VALUE ? 0 : period->GetStart(); 
+    const uint64_t periodStartMs = period->GetStart() == NO_VALUE ? 0 : period->GetStart();
     const uint64_t periodDurMs = period->GetDuration() * 1000 / period->GetTimescale();
     const bool isPeriodTSB = period->IsInRange(liveEdgeMs);
 
@@ -1914,18 +1929,21 @@ void adaptive::CDashTree::InsertLiveSegment(PLAYLIST::CPeriod* currPeriod,
 
           GenerateTemplatedSegments(*rep->GetSegmentTemplate(), periodStartMs, periodDurMs,
                                     segNumberEnd, rep->Timeline(), nowMs);
+          RestoreCachedSegments(period.get(), adpSet.get(), rep.get());
         }
         else
         {
           // The period is outside the TSB so delete all segments,
           // this is the case of video resume from a long pause
           rep->Timeline().Clear();
-          rep->current_segment_.reset();
+          RestoreCachedSegments(period.get(), adpSet.get(), rep.get());
+          if (rep->Timeline().IsEmpty())
+            rep->current_segment_.reset();
         }
 
         // Update period timeline duration
         if (!rep->HasSegmentBase() && (adpSet->GetStreamType() == StreamType::VIDEO ||
-            adpSet->GetStreamType() == StreamType::AUDIO))
+                                       adpSet->GetStreamType() == StreamType::AUDIO))
         {
           if (rep->GetTimescale() == 0)
           {

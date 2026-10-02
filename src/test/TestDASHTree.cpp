@@ -16,7 +16,59 @@
 
 #include <gtest/gtest.h>
 
+#include <memory>
+
 using namespace UTILS;
+
+TEST(DashCacheTimeline, RestoresDownloadedHistoryAndDropsEvictedStart)
+{
+  DASHTestTree tree;
+  auto cache = std::make_shared<ADP::SegmentCache>(ADP::SegmentCache::Mode::MEMORY, 4);
+  tree.SetSegmentCacheForTest(cache);
+
+  PLAYLIST::CPeriod period;
+  period.SetId("period");
+  period.SetStart(0);
+  PLAYLIST::CAdaptationSet adp{&period};
+  adp.SetId("video");
+  PLAYLIST::CRepresentation rep{&adp};
+  rep.SetId("720p");
+  rep.SetTimescale(1000);
+
+  auto addCached = [&](uint64_t number, uint64_t start)
+  {
+    ADP::SegmentCache::Key key{"segment-" + std::to_string(number), {}, number, start};
+    key.periodId = "period";
+    key.periodStart = 0;
+    key.adaptationId = "video";
+    key.representationId = "720p";
+    PLAYLIST::CSegment segment;
+    segment.m_number = number;
+    segment.startPTS_ = start;
+    segment.m_endPts = start + 6;
+    cache->Put(key, {1, 2}, {}, segment);
+  };
+  PLAYLIST::CSegment manifestSegment;
+  manifestSegment.m_number = 3;
+  manifestSegment.startPTS_ = 112;
+  manifestSegment.m_endPts = 118;
+  rep.Timeline().Add(manifestSegment);
+
+  addCached(1, 100);
+  addCached(2, 106);
+  tree.RestoreCachedSegments(&period, &adp, &rep);
+  ASSERT_EQ(rep.Timeline().GetSize(), 3U);
+  EXPECT_EQ(rep.Timeline().FindByPTSOrNext(101)->m_number, 1U);
+  EXPECT_EQ(rep.Timeline().GetBack()->m_number, 3U);
+
+  // The oldest entry has gone: a new manifest must not offer it for seek.
+  addCached(4, 118);
+  rep.Timeline().Clear();
+  rep.Timeline().Add(manifestSegment);
+  tree.RestoreCachedSegments(&period, &adp, &rep);
+  ASSERT_EQ(rep.Timeline().GetSize(), 2U);
+  EXPECT_EQ(rep.Timeline().GetFront()->m_number, 2U);
+}
 
 class DASHTreeTest : public ::testing::Test
 {

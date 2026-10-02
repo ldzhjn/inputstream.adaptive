@@ -363,7 +363,7 @@ msgid "Cache mode"
 msgstr ""
 
 msgctxt "#30246"
-msgid "Reuse previously downloaded live DASH or HLS segments when seeking. The cache does not extend the seek range advertised by the stream."
+msgid "Keep downloaded live DASH or HLS segments seekable from the start of playback while they remain cached. Automatic quality switching is disabled for a continuous replay timeline."
 msgstr ""
 
 msgctxt "#30247"

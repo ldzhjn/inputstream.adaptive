@@ -254,13 +254,14 @@ bool SESSION::CSession::CheckPlayableStreams(PLAYLIST::CPeriod* period)
             if (m_drmEngine.GetStatus() == DRM::EngineStatus::NOT_SUPPORTED)
             {
               LOG::Log(LOGWARNING,
-                       "Disabled stream repr ID \"%s\", AdpSet ID \"%s\", due to unsupported DRM feature",
+                       "Disabled stream repr ID \"%s\", AdpSet ID \"%s\", due to unsupported DRM "
+                       "feature",
                        repr->GetId().c_str(), adp->GetId().c_str());
               repr->isPlayable = false;
               continue;
             }
             else if (m_drmEngine.GetStatus() == DRM::EngineStatus::DRM_ERROR ||
-                m_drmEngine.GetStatus() == DRM::EngineStatus::DECRYPTER_ERROR)
+                     m_drmEngine.GetStatus() == DRM::EngineStatus::DECRYPTER_ERROR)
             {
               return false; // return here, a bad status dont allow you to play streams
             }
@@ -337,7 +338,8 @@ void SESSION::CSession::InitializePeriod()
 
     if (adp->GetStreamType() == StreamType::NOTYPE)
     {
-      LOG::LogF(LOGDEBUG, "Skipped streams on adaptation set id \"%s\" due to unsupported/unknown type",
+      LOG::LogF(LOGDEBUG,
+                "Skipped streams on adaptation set id \"%s\" due to unsupported/unknown type",
                 adp->GetId().c_str());
       continue;
     }
@@ -568,7 +570,8 @@ void SESSION::CSession::UpdateStream(CStream& stream)
       stream.m_info.SetCodecFourCC(CODEC::MakeFourCC(CODEC::FOURCC_DVHE));
     }
     else if (CODEC::Contains(codecs, CODEC::FOURCC_VP09, codecStr) ||
-             CODEC::Contains(codecs, CODEC::NAME_VP9, codecStr)) // Some streams incorrectly use the name
+             CODEC::Contains(codecs, CODEC::NAME_VP9,
+                             codecStr)) // Some streams incorrectly use the name
     {
       stream.m_info.SetCodecName(CODEC::NAME_VP9);
       if (STRING::Contains(codecStr, "."))
@@ -596,7 +599,8 @@ void SESSION::CSession::UpdateStream(CStream& stream)
       }
     }
     else if (CODEC::Contains(codecs, CODEC::FOURCC_AV01, codecStr) ||
-             CODEC::Contains(codecs, CODEC::NAME_AV1, codecStr)) // Some streams incorrectly use the name
+             CODEC::Contains(codecs, CODEC::NAME_AV1,
+                             codecStr)) // Some streams incorrectly use the name
       stream.m_info.SetCodecName(CODEC::NAME_AV1);
     else
     {
@@ -615,7 +619,7 @@ void SESSION::CSession::UpdateStream(CStream& stream)
       stream.m_info.SetCodecName(CODEC::NAME_AAC);
 
       if (STRING::Contains(codecStr, "mp4a.40.29"))
-          stream.m_info.SetCodecProfile(STREAMCODEC_PROFILE::AACCodecProfileHEV2);
+        stream.m_info.SetCodecProfile(STREAMCODEC_PROFILE::AACCodecProfileHEV2);
       else if (STRING::Contains(codecStr, "mp4a.40.2") || STRING::Contains(codecStr, "mp4a.40.17"))
         stream.m_info.SetCodecProfile(STREAMCODEC_PROFILE::AACCodecProfileLOW); // AAC-LC
       else if (STRING::Contains(codecStr, "mp4a.40.3"))
@@ -637,7 +641,8 @@ void SESSION::CSession::UpdateStream(CStream& stream)
     }
     else if (CODEC::Contains(codecs, CODEC::FOURCC_OPUS, codecStr))
       stream.m_info.SetCodecName(CODEC::NAME_OPUS);
-    else if (CODEC::Contains(codecs, CODEC::FOURCC_VORB, codecStr) || // Find "vorb" and "vorbis" case
+    else if (CODEC::Contains(codecs, CODEC::FOURCC_VORB,
+                             codecStr) || // Find "vorb" and "vorbis" case
              CODEC::Contains(codecs, CODEC::FOURCC_VORB1, codecStr) ||
              CODEC::Contains(codecs, CODEC::FOURCC_VORB1P, codecStr) ||
              CODEC::Contains(codecs, CODEC::FOURCC_VORB2, codecStr) ||
@@ -656,7 +661,8 @@ void SESSION::CSession::UpdateStream(CStream& stream)
     if (CODEC::Contains(codecs, CODEC::FOURCC_TTML, codecStr) ||
         CODEC::Contains(codecs, CODEC::FOURCC_DFXP, codecStr) ||
         CODEC::Contains(codecs, CODEC::FOURCC_STPP, codecStr))
-      stream.m_info.SetCodecName(CODEC::NAME_SRT); // We convert it to SRT, Kodi dont support TTML yet
+      stream.m_info.SetCodecName(
+          CODEC::NAME_SRT); // We convert it to SRT, Kodi dont support TTML yet
     else if (CODEC::Contains(codecs, CODEC::FOURCC_WVTT, codecStr))
       stream.m_info.SetCodecName(CODEC::NAME_WEBVTT);
     else
@@ -788,6 +794,12 @@ void CSession::EnableStream(std::shared_ptr<CStream> stream, bool enable)
 
 uint64_t SESSION::CSession::GetTotalTimeMs() const
 {
+  if (m_adaptiveTree->IsLive() && m_adaptiveTree->GetSegmentCache())
+  {
+    const uint64_t mediaDuration = GetMediaDurationMs();
+    const uint64_t delayMs = m_adaptiveTree->m_liveDelay * 1000;
+    return mediaDuration > delayMs ? mediaDuration - delayMs : 0;
+  }
   // In live streaming do not take into account the live delay duration, because its not seekable
   if (m_adaptiveTree->IsLive() && m_adaptiveTree->m_totalTime > m_adaptiveTree->m_liveDelay * 1000)
     return m_adaptiveTree->m_totalTime - m_adaptiveTree->m_liveDelay * 1000;
@@ -850,7 +862,8 @@ bool SESSION::CSession::GetNextSample(ISampleReader*& sampleReader)
     ISampleReader* sr{res->GetReader()};
 
     if (sr->PTS() != STREAM_NOPTS_VALUE && m_timingStream.get() == res)
-      m_elapsedTime = PTSToElapsed(sr->PTS(), res) + GetChapterStartTime();
+      m_elapsedTime = PTSToElapsed(sr->PTS(), res) +
+                      (m_adaptiveTree->GetSegmentCache() ? 0 : GetChapterStartTime());
 
     sampleReader = sr;
     return true;
@@ -878,20 +891,65 @@ bool SESSION::CSession::SeekTime(double seekTime, bool& isError)
     if (m_adaptiveTree->m_periods.empty())
       return false;
 
-    double chapterTime{0};
     auto pi = m_adaptiveTree->m_periods.cbegin();
-
-    for (; pi != m_adaptiveTree->m_periods.cend(); pi++)
+    if (m_adaptiveTree->GetSegmentCache())
     {
-      chapterTime += double((*pi)->GetTlDuration()) / (*pi)->GetTimescale();
-      if (chapterTime > seekTime)
-        break;
+      const uint64_t anchor = m_adaptiveTree->GetCachePlaybackStartPts();
+      if (anchor == NO_VALUE)
+        return false;
+      seekTime = std::max(0.0, seekTime);
+      const uint64_t targetPts = anchor + static_cast<uint64_t>(seekTime * STREAM_TIME_BASE);
+      const bool hasVideo = std::any_of(m_streams.begin(), m_streams.end(), [](const auto& stream)
+                                        {
+                                          return stream->IsEnabled() &&
+                                                 stream->m_info.GetStreamType() ==
+                                                     INPUTSTREAM_TYPE_VIDEO;
+                                        });
+      for (; pi != m_adaptiveTree->m_periods.cend(); ++pi)
+      {
+        auto covers = [&](bool video)
+        {
+          for (const auto& adp : (*pi)->GetAdaptationSets())
+          {
+            const StreamType type = adp->GetStreamType();
+            if (video ? (type != StreamType::VIDEO && type != StreamType::VIDEO_AUDIO)
+                      : type != StreamType::AUDIO)
+              continue;
+            for (const auto& rep : adp->GetRepresentations())
+            {
+              const CSegment* first = rep->Timeline().GetFront();
+              const CSegment* last = rep->Timeline().GetBack();
+              const uint64_t scale = rep->GetTimescale();
+              if (first && last && scale > 0 &&
+                  targetPts >= first->startPTS_ * STREAM_TIME_BASE / scale &&
+                  targetPts <= last->m_endPts * STREAM_TIME_BASE / scale)
+                return true;
+            }
+          }
+          return false;
+        };
+        if (covers(hasVideo))
+          break;
+      }
+      if (pi == m_adaptiveTree->m_periods.cend())
+        return false;
     }
+    else
+    {
+      double chapterTime{0};
+      for (; pi != m_adaptiveTree->m_periods.cend(); pi++)
+      {
+        chapterTime += double((*pi)->GetTlDuration()) / (*pi)->GetTimescale();
+        if (chapterTime > seekTime)
+          break;
+      }
 
-    if (pi == m_adaptiveTree->m_periods.cend())
-      --pi;
+      if (pi == m_adaptiveTree->m_periods.cend())
+        --pi;
 
-    chapterTime -= double((*pi)->GetTlDuration()) / (*pi)->GetTimescale();
+      chapterTime -= double((*pi)->GetTlDuration()) / (*pi)->GetTimescale();
+      seekTime -= chapterTime;
+    }
 
     if ((*pi).get() != m_adaptiveTree->m_currentPeriod)
     {
@@ -899,16 +957,15 @@ bool SESSION::CSession::SeekTime(double seekTime, bool& isError)
                static_cast<int>((pi - m_adaptiveTree->m_periods.begin()) + 1));
       SeekChapter(static_cast<int>(pi - m_adaptiveTree->m_periods.begin()) + 1);
       m_chapterSeekTime = seekTime;
+      m_chapterSeekPending = true;
       return true;
     }
-
-    seekTime -= chapterTime;
   }
 
   if (m_adaptiveTree->IsLive())
   {
-    double delayPtsSecs =
-        (static_cast<double>(GetMediaDurationMs()) / 1000) - m_adaptiveTree->m_liveDelay;
+    double delayPtsSecs = std::max(0.0, (static_cast<double>(GetMediaDurationMs()) / 1000) -
+                                            m_adaptiveTree->m_liveDelay);
 
     // Check to avoid seek into live delay duration portion, to allow an appropriate live buffering
     if (seekTime > delayPtsSecs)
@@ -1042,13 +1099,14 @@ void SESSION::CSession::OnDemuxRead()
   {
     m_adaptiveTree->m_nextPeriod = nullptr;
 
-    if (GetChapterSeekTime() > 0)
+    if (m_chapterSeekPending)
     {
       bool isError{false};
       if (!SeekTime(GetChapterSeekTime(), isError))
         DeleteStreams();
 
       ResetChapterSeekTime();
+      m_chapterSeekPending = false;
     }
   }
 }
@@ -1316,8 +1374,11 @@ PLAYLIST::CAdaptationSet* SESSION::CSession::DetermineDefaultAdpSet(PLAYLIST::CP
   return defaultAdp;
 }
 
-uint64_t SESSION::CSession::GetMediaDurationMs()
+uint64_t SESSION::CSession::GetMediaDurationMs() const
 {
+  if (m_adaptiveTree->IsLive() && m_adaptiveTree->GetSegmentCache())
+    return m_adaptiveTree->GetCachedLiveDurationMs();
+
   if (!m_timingStream || !m_timingStream->IsEnabled())
     return 0;
 

@@ -99,13 +99,34 @@ void SegmentCache::Erase(std::list<Entry>::iterator entry)
   m_entries.erase(entry);
 }
 
-bool SegmentCache::Get(const Key& key, std::vector<uint8_t>& data, std::vector<Chunk>* chunks)
+bool SegmentCache::Get(const Key& key,
+                       std::vector<uint8_t>& data,
+                       std::vector<Chunk>* chunks,
+                       std::optional<PLAYLIST::CSegment>* segment)
 {
   if (!m_available)
     return false;
 
   std::lock_guard lock(m_mutex);
   auto entry = Find(key);
+  if (entry == m_entries.end())
+  {
+    // A refreshed live manifest may rotate URL signatures while retaining
+    // the same segment. Its immutable media identity is enough for replay.
+    entry = std::find_if(m_entries.begin(), m_entries.end(),
+                         [&](const Entry& candidate)
+                         {
+                           const Key& old = candidate.key;
+                           return candidate.segment && !candidate.segment->IsInitialization() &&
+                                  old.number == key.number && old.startPts == key.startPts &&
+                                  old.iv == key.iv &&
+                                  old.periodId == key.periodId &&
+                                  old.periodSequence == key.periodSequence &&
+                                  old.periodStart == key.periodStart &&
+                                  old.adaptationId == key.adaptationId &&
+                                  old.representationId == key.representationId;
+                         });
+  }
   if (entry == m_entries.end())
     return false;
 
@@ -135,11 +156,16 @@ bool SegmentCache::Get(const Key& key, std::vector<uint8_t>& data, std::vector<C
 
   if (chunks)
     *chunks = entry->chunks;
+  if (segment)
+    *segment = entry->segment;
   m_entries.splice(m_entries.begin(), m_entries, entry);
   return true;
 }
 
-void SegmentCache::Put(Key key, std::vector<uint8_t> data, std::vector<Chunk> chunks)
+void SegmentCache::Put(Key key,
+                       std::vector<uint8_t> data,
+                       std::vector<Chunk> chunks,
+                       std::optional<PLAYLIST::CSegment> segment)
 {
   if (!m_available || data.empty() || data.size() > m_maxBytes)
     return;
@@ -164,7 +190,7 @@ void SegmentCache::Put(Key key, std::vector<uint8_t> data, std::vector<Chunk> ch
   while (m_sizeBytes + data.size() > m_maxBytes)
     Erase(std::prev(m_entries.end()));
 
-  Entry entry{std::move(key), data.size(), {}, std::move(chunks), {}};
+  Entry entry{std::move(key), data.size(), {}, std::move(chunks), {}, std::move(segment)};
   if (m_mode == Mode::MEMORY)
   {
     entry.data = std::move(data);
@@ -197,4 +223,46 @@ void SegmentCache::Put(Key key, std::vector<uint8_t> data, std::vector<Chunk> ch
 
   m_sizeBytes += entry.size;
   m_entries.push_front(std::move(entry));
+}
+
+std::vector<PLAYLIST::CSegment> SegmentCache::GetSegments(uint64_t periodStart,
+                                                          const std::string& periodId,
+                                                          uint32_t periodSequence,
+                                                          const std::string& adaptationId,
+                                                          const std::string& representationId)
+{
+  std::vector<PLAYLIST::CSegment> segments;
+  if (!m_available)
+    return segments;
+
+  std::lock_guard lock(m_mutex);
+  for (const Entry& entry : m_entries)
+  {
+    const Key& key = entry.key;
+    if (entry.segment && !entry.segment->IsInitialization() && key.periodStart == periodStart &&
+        key.periodId == periodId && key.periodSequence == periodSequence &&
+        key.adaptationId == adaptationId && key.representationId == representationId)
+      segments.push_back(*entry.segment);
+  }
+  std::sort(segments.begin(), segments.end(),
+            [](const auto& a, const auto& b) { return a.startPTS_ < b.startPTS_; });
+  return segments;
+}
+
+bool SegmentCache::HasPeriod(uint64_t periodStart,
+                             const std::string& periodId,
+                             uint32_t periodSequence)
+{
+  if (!m_available)
+    return false;
+
+  std::lock_guard lock(m_mutex);
+  return std::any_of(m_entries.begin(), m_entries.end(),
+                     [&](const Entry& entry)
+                     {
+                       return entry.segment && !entry.segment->IsInitialization() &&
+                              entry.key.periodStart == periodStart &&
+                              entry.key.periodId == periodId &&
+                              entry.key.periodSequence == periodSequence;
+                     });
 }

@@ -8,12 +8,15 @@
 
 #pragma once
 
+#include "Segment.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <list>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -39,12 +42,17 @@ public:
     std::vector<uint8_t> iv;
     std::string periodId;
     uint32_t periodSequence{0};
+    uint64_t periodStart{0};
+    std::string adaptationId;
+    std::string representationId;
 
     bool operator==(const Key& other) const
     {
       return url == other.url && headers == other.headers && number == other.number &&
              startPts == other.startPts && keyUrl == other.keyUrl && iv == other.iv &&
-             periodId == other.periodId && periodSequence == other.periodSequence;
+             periodId == other.periodId && periodSequence == other.periodSequence &&
+             periodStart == other.periodStart && adaptationId == other.adaptationId &&
+             representationId == other.representationId;
     }
   };
 
@@ -67,8 +75,20 @@ public:
 
   bool IsAvailable() const { return m_available; }
   size_t MaxBytes() const { return m_maxBytes; }
-  bool Get(const Key& key, std::vector<uint8_t>& data, std::vector<Chunk>* chunks = nullptr);
-  void Put(Key key, std::vector<uint8_t> data, std::vector<Chunk> chunks = {});
+  bool Get(const Key& key,
+           std::vector<uint8_t>& data,
+           std::vector<Chunk>* chunks = nullptr,
+           std::optional<PLAYLIST::CSegment>* segment = nullptr);
+  void Put(Key key,
+           std::vector<uint8_t> data,
+           std::vector<Chunk> chunks = {},
+           std::optional<PLAYLIST::CSegment> segment = std::nullopt);
+  std::vector<PLAYLIST::CSegment> GetSegments(uint64_t periodStart,
+                                              const std::string& periodId,
+                                              uint32_t periodSequence,
+                                              const std::string& adaptationId,
+                                              const std::string& representationId);
+  bool HasPeriod(uint64_t periodStart, const std::string& periodId, uint32_t periodSequence);
 
 private:
   struct Entry
@@ -78,6 +98,7 @@ private:
     std::vector<uint8_t> data;
     std::vector<Chunk> chunks;
     std::filesystem::path path;
+    std::optional<PLAYLIST::CSegment> segment;
   };
 
   std::list<Entry>::iterator Find(const Key& key);

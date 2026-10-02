@@ -121,3 +121,87 @@ TEST(SegmentCache, RejectsNonLocalDiskPath)
   SegmentCache cache{SegmentCache::Mode::DISK, 6, "smb://server/share"};
   EXPECT_FALSE(cache.IsAvailable());
 }
+
+TEST(SegmentCache, InitializationDataIsReplayableButNotTimelineMedia)
+{
+  SegmentCache cache{SegmentCache::Mode::MEMORY, 6};
+  SegmentCache::Key key{"init.m4i", {}, 0, 0};
+  key.periodId = "period";
+  key.adaptationId = "video";
+  key.representationId = "720p";
+  PLAYLIST::CSegment init;
+  init.SetIsInitialization(true);
+  init.AESKeyInfo() = CAesKeyInfo{{1, 2, 3}, {}, "key-uri"};
+  cache.Put(key, {4, 5}, {}, init);
+
+  std::vector<uint8_t> bytes;
+  std::optional<PLAYLIST::CSegment> cachedSegment;
+  ASSERT_TRUE(cache.Get(key, bytes, nullptr, &cachedSegment));
+  ASSERT_TRUE(cachedSegment);
+  EXPECT_TRUE(cachedSegment->IsInitialization());
+  EXPECT_EQ(cachedSegment->AESKeyInfo()->key, (std::vector<uint8_t>{1, 2, 3}));
+  EXPECT_TRUE(cache.GetSegments(0, "period", 0, "video", "720p").empty());
+  EXPECT_FALSE(cache.HasPeriod(0, "period", 0));
+}
+
+TEST(SegmentCache, RetainsOnlyDownloadedTimelineAcrossUrlRefreshAndEviction)
+{
+  for (const auto mode : {SegmentCache::Mode::MEMORY, SegmentCache::Mode::DISK})
+  {
+    const auto root = std::filesystem::temp_directory_path() /
+                      ("isa-cache-history-" +
+                       std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    {
+      SegmentCache cache{mode, 6, root};
+      ASSERT_TRUE(cache.IsAvailable());
+
+      SegmentCache::Key first{"old-token/1", {}, 1, 100};
+      first.periodId = "period";
+      first.adaptationId = "video";
+      first.representationId = "720p";
+      PLAYLIST::CSegment firstSegment;
+      firstSegment.m_number = 1;
+      firstSegment.startPTS_ = 100;
+      firstSegment.m_endPts = 106;
+      cache.Put(first, {1, 2, 3}, {}, firstSegment);
+
+      auto second = first;
+      second.url = "old-token/2";
+      second.number = 2;
+      second.startPts = 106;
+      auto secondSegment = firstSegment;
+      secondSegment.m_number = 2;
+      secondSegment.startPTS_ = 106;
+      secondSegment.m_endPts = 112;
+      cache.Put(second, {4, 5, 6}, {}, secondSegment);
+
+      auto segments = cache.GetSegments(0, "period", 0, "video", "720p");
+      ASSERT_EQ(segments.size(), 2U);
+      EXPECT_EQ(segments[0].m_number, 1U);
+      EXPECT_EQ(segments[1].m_number, 2U);
+      EXPECT_TRUE(cache.HasPeriod(0, "period", 0));
+
+      std::vector<uint8_t> bytes;
+      auto refreshed = first;
+      refreshed.url = "new-token/1";
+      EXPECT_TRUE(cache.Get(refreshed, bytes));
+      EXPECT_EQ(bytes, (std::vector<uint8_t>{1, 2, 3}));
+
+      auto third = second;
+      third.url = "new-token/3";
+      third.number = 3;
+      third.startPts = 112;
+      auto thirdSegment = secondSegment;
+      thirdSegment.m_number = 3;
+      thirdSegment.startPTS_ = 112;
+      thirdSegment.m_endPts = 118;
+      cache.Put(third, {7, 8, 9}, {}, thirdSegment);
+      segments = cache.GetSegments(0, "period", 0, "video", "720p");
+      ASSERT_EQ(segments.size(), 2U);
+      EXPECT_EQ(segments[0].m_number, 1U);
+      EXPECT_EQ(segments[1].m_number, 3U);
+    }
+    if (mode == SegmentCache::Mode::DISK)
+      std::filesystem::remove(root);
+  }
+}

@@ -15,8 +15,8 @@
 #include "Chooser.h"
 #include "CompKodiProps.h"
 #include "SrvBroker.h"
-#include "utils/StringUtils.h"
 #include "utils/CurlUtils.h"
+#include "utils/StringUtils.h"
 #include "utils/UrlUtils.h"
 #include "utils/log.h"
 
@@ -26,7 +26,6 @@
 #include <iostream>
 
 #include <bento4/Ap4.h>
-
 #include <kodi/addon-instance/inputstream/TimingConstants.h>
 
 using namespace adaptive;
@@ -70,7 +69,8 @@ void adaptive::AdaptiveStream::Reset()
 {
   segment_read_pos_ = 0;
   currentPTSOffset_ = 0;
-  absolutePTSOffset_ = 0;
+  if (!m_tree->GetSegmentCache())
+    absolutePTSOffset_ = 0;
   m_isWaitingForSegment = false;
 }
 
@@ -105,12 +105,10 @@ bool adaptive::AdaptiveStream::DownloadImpl(const DownloadInfo& downloadInfo,
   // Append stream parameters
   URL::AppendParameters(url, m_streamParams);
 
-  // Keep replay within the manifest seek window, but avoid fetching previously
-  // downloaded media again when the player seeks backward and then forward.
+  // A completed cache entry also carries its original segment timing, allowing
+  // live manifest refreshes to retain a seek path into downloaded history.
   ADP::SegmentCache* cache = m_tree->GetSegmentCache();
-  const bool useCache = cache && m_tree->IsLive() && !downloadData &&
-                        downloadInfo.m_segmentBuffer &&
-                        !downloadInfo.m_segmentBuffer->segment.IsInitialization();
+  const bool useCache = cache && m_tree->IsLive() && !downloadData && downloadInfo.m_segmentBuffer;
   ADP::SegmentCache::Key cacheKey{url, headers, 0, 0};
   bool canStore = false;
   bool isAesSegment = false;
@@ -123,6 +121,9 @@ bool adaptive::AdaptiveStream::DownloadImpl(const DownloadInfo& downloadInfo,
     cacheKey.startPts = segment.startPTS_;
     cacheKey.periodId = current_period_->GetId();
     cacheKey.periodSequence = current_period_->GetSequence();
+    cacheKey.periodStart = current_period_->GetStart();
+    cacheKey.adaptationId = current_adp_->GetId();
+    cacheKey.representationId = downloadInfo.m_segmentBuffer->rep->GetId();
     isAesSegment = segment.AESKeyInfo().has_value();
     if (isAesSegment)
     {
@@ -135,8 +136,11 @@ bool adaptive::AdaptiveStream::DownloadImpl(const DownloadInfo& downloadInfo,
     {
       std::vector<uint8_t> cachedData;
       std::vector<ADP::SegmentCache::Chunk> cachedChunks;
-      if (cache->Get(cacheKey, cachedData, &cachedChunks))
+      std::optional<PLAYLIST::CSegment> cachedSegment;
+      if (cache->Get(cacheKey, cachedData, &cachedChunks, &cachedSegment))
       {
+        if (cachedSegment && isAesSegment)
+          downloadInfo.m_segmentBuffer->segment.AESKeyInfo() = cachedSegment->AESKeyInfo();
         size_t offset{0};
         for (const auto& chunk : cachedChunks)
         {
@@ -259,10 +263,16 @@ bool adaptive::AdaptiveStream::DownloadImpl(const DownloadInfo& downloadInfo,
                  url.c_str(), totalBytesRead, downloadSpeed);
         if (useCache && canStore && thread_data_->State() != THREADDATA::ThState::STOPPED)
         {
+          // HLS AES-128 can fill AESKeyInfo during OnDataArrived. Retain that
+          // completed metadata so an expired key URL does not break replay.
+          const auto& segment = downloadInfo.m_segmentBuffer->segment;
+          const std::optional<PLAYLIST::CSegment> timelineSegment = segment;
           if (isAesSegment)
-            cache->Put(std::move(cacheKey), std::move(cacheData), std::move(cacheChunks));
+            cache->Put(std::move(cacheKey), std::move(cacheData), std::move(cacheChunks),
+                       timelineSegment);
           else
-            cache->Put(std::move(cacheKey), downloadInfo.m_segmentBuffer->ReadBuffer());
+            cache->Put(std::move(cacheKey), downloadInfo.m_segmentBuffer->ReadBuffer(), {},
+                       timelineSegment);
         }
         return true;
       }
@@ -296,8 +306,8 @@ bool adaptive::AdaptiveStream::PrepareDownload(const PLAYLIST::CRepresentation* 
 
     if (seg.IsInitialization()) // Templated initialization segment
     {
-      streamUrl = segTpl->FormatUrl(segTpl->GetInitialization(), rep->GetId(),
-                                    rep->GetBandwidth(), rep->GetStartNumber(), 0);
+      streamUrl = segTpl->FormatUrl(segTpl->GetInitialization(), rep->GetId(), rep->GetBandwidth(),
+                                    rep->GetStartNumber(), 0);
     }
     else // Templated media segment
     {
@@ -604,7 +614,8 @@ bool adaptive::AdaptiveStream::parseIndexRange(PLAYLIST::CRepresentation* rep,
         uint64_t periodEndMs = NO_PTS_VALUE;
         if (current_period_->GetTlDuration() != 0)
         {
-          const uint64_t periodDurMs = current_period_->GetTlDuration() * 1000 / current_period_->GetTimescale();
+          const uint64_t periodDurMs =
+              current_period_->GetTlDuration() * 1000 / current_period_->GetTimescale();
           periodEndMs = periodStartMs + periodDurMs;
         }
 
@@ -666,7 +677,8 @@ bool adaptive::AdaptiveStream::parseIndexRange(PLAYLIST::CRepresentation* rep,
     }
 
     // Update period timeline duration
-    if (current_adp_->GetStreamType() == StreamType::VIDEO || current_adp_->GetStreamType() == StreamType::AUDIO)
+    if (current_adp_->GetStreamType() == StreamType::VIDEO ||
+        current_adp_->GetStreamType() == StreamType::AUDIO)
     {
       if (rep->GetTimescale() == 0)
       {
@@ -755,8 +767,7 @@ bool adaptive::AdaptiveStream::start_stream()
       //! more likely live delay management should be moved just after manifest parsing and before period init
       auto timelineItRend = current_rep_->Timeline().rend();
 
-      for (auto itSeg = current_rep_->Timeline().rbegin(); itSeg != timelineItRend;
-           ++itSeg)
+      for (auto itSeg = current_rep_->Timeline().rbegin(); itSeg != timelineItRend; ++itSeg)
       {
         // Implicit rounding down because managing PTS milliseconds negatively affects segment selection
         totalDurSecs += (itSeg->m_endPts - itSeg->startPTS_) / timescale;
@@ -829,9 +840,21 @@ bool adaptive::AdaptiveStream::start_stream()
   {
     currentPTSOffset_ =
         (next_segment->startPTS_ * current_rep_->timescale_ext_) / current_rep_->timescale_int_;
-    absolutePTSOffset_ =
-        (current_rep_->Timeline().Get(0)->startPTS_ * current_rep_->timescale_ext_) /
-        current_rep_->timescale_int_;
+    if (m_tree->GetSegmentCache() && m_tree->IsLive())
+    {
+      const CSegment* firstPlayedSegment = current_rep_->GetNextSegment();
+      const uint64_t proposedPts =
+          ((firstPlayedSegment ? firstPlayedSegment : next_segment)->startPTS_ *
+           current_rep_->timescale_ext_) /
+          current_rep_->timescale_int_;
+      absolutePTSOffset_ = m_tree->GetOrSetCachePlaybackStartPts(proposedPts);
+    }
+    else
+    {
+      absolutePTSOffset_ =
+          (current_rep_->Timeline().Get(0)->startPTS_ * current_rep_->timescale_ext_) /
+          current_rep_->timescale_int_;
+    }
   }
 
   current_rep_->SetIsEnabled(true);
@@ -949,7 +972,9 @@ bool adaptive::AdaptiveStream::ensureSegment()
           absPtsOffset = current_rep_->Timeline().GetFront()->startPTS_;
 
         absolutePTSOffset_ =
-            (absPtsOffset * current_rep_->timescale_ext_) / current_rep_->timescale_int_;
+            m_tree->GetSegmentCache() && m_tree->IsLive()
+                ? m_tree->GetOrSetCachePlaybackStartPts(currentPTSOffset_)
+                : (absPtsOffset * current_rep_->timescale_ext_) / current_rep_->timescale_int_;
 
         current_rep_->current_segment_ = *nextSegment;
 
@@ -989,7 +1014,11 @@ bool adaptive::AdaptiveStream::ensureSegment()
           // The representation from the last added segment buffer
           CRepresentation* prevRep = newRep;
 
-          newRep = m_tree->GetRepChooser()->GetNextRepresentation(current_adp_, prevRep);
+          // Cached live history is one continuous representation. Switching
+          // bitrate mid-session would leave unplayable gaps in the rewind path.
+          newRep = m_tree->GetSegmentCache() && m_tree->IsLive()
+                       ? prevRep
+                       : m_tree->GetRepChooser()->GetNextRepresentation(current_adp_, prevRep);
 
           //! @todo: There is the possibility that stream quality switching happen frequently in very short time,
           //! so if OnStreamChange is used on a parser, it could overload servers of manifest requests
@@ -1057,8 +1086,10 @@ bool adaptive::AdaptiveStream::ensureSegment()
       if (m_segBuffers.IsEmpty() && !m_isWaitingForSegment)
       {
         m_isWaitingForSegment = true;
-        LOG::LogF(LOGDEBUG, "[AS-%u] Begin WaitForSegment (buffer is empty) stream rep. id \"%s\" period id \"%s\"",
-                  clsId, current_rep_->GetId().c_str(), current_period_->GetId().c_str());
+        LOG::LogF(
+            LOGDEBUG,
+            "[AS-%u] Begin WaitForSegment (buffer is empty) stream rep. id \"%s\" period id \"%s\"",
+            clsId, current_rep_->GetId().c_str(), current_period_->GetId().c_str());
       }
       return false;
     }
@@ -1235,7 +1266,7 @@ bool adaptive::AdaptiveStream::seek(uint64_t const pos, bool& isEos)
   return true;
 }
 
-uint64_t adaptive::AdaptiveStream::getMaxTimeMs()
+uint64_t adaptive::AdaptiveStream::getMaxTimeMs() const
 {
   const CSegment* lastSeg = current_rep_->Timeline().GetBack();
   if (!lastSeg)
@@ -1301,8 +1332,8 @@ int adaptive::AdaptiveStream::GetTrackType() const
     case StreamType::SUBTITLE:
       return AP4_Track::TYPE_SUBTITLES;
     default:
-      LOG::LogF(LOGERROR, "[AS-%u] Stream type \"%i\" not mapped to AP4_Track::Type",
-                clsId, static_cast<int>(current_adp_->GetStreamType()));
+      LOG::LogF(LOGERROR, "[AS-%u] Stream type \"%i\" not mapped to AP4_Track::Type", clsId,
+                static_cast<int>(current_adp_->GetStreamType()));
       break;
   }
   return AP4_Track::TYPE_UNKNOWN;
@@ -1312,7 +1343,8 @@ PLAYLIST::StreamType adaptive::AdaptiveStream::GetStreamType() const
 {
   if (!current_adp_)
   {
-    LOG::LogF(LOGERROR, "[AS-%u] Failed get stream type, current adaptation set is nullptr.", clsId);
+    LOG::LogF(LOGERROR, "[AS-%u] Failed get stream type, current adaptation set is nullptr.",
+              clsId);
     return StreamType::NOTYPE;
   }
   return current_adp_->GetStreamType();

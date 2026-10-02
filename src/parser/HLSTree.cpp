@@ -32,6 +32,48 @@ namespace
 // Timescale for ms
 constexpr uint64_t TIMESCALE = 1000;
 
+// A media playlist without PROGRAM-DATE-TIME starts its local timestamps at
+// zero on every reload. Keep the timestamps of overlapping media sequences so
+// the cached history and the refreshed window share one seek timeline.
+void AlignCachedLiveTimeline(const CSegContainer& previous, CSegContainer& refreshed)
+{
+  if (previous.IsEmpty() || refreshed.IsEmpty())
+    return;
+
+  const CSegment* anchorOld{nullptr};
+  const CSegment* anchorNew{nullptr};
+  for (const auto& segment : refreshed)
+  {
+    const CSegment* match = previous.Find(segment);
+    if (match && match->m_number == segment.m_number)
+    {
+      anchorOld = match;
+      anchorNew = &segment;
+      break;
+    }
+  }
+
+  if (!anchorOld || !anchorNew)
+    return;
+
+  const bool add = anchorOld->startPTS_ >= anchorNew->startPTS_;
+  const uint64_t shift = add ? anchorOld->startPTS_ - anchorNew->startPTS_
+                             : anchorNew->startPTS_ - anchorOld->startPTS_;
+  if (shift == 0)
+    return;
+
+  CSegContainer aligned;
+  for (auto segment : refreshed)
+  {
+    if (!add && (segment.startPTS_ < shift || segment.m_endPts < shift))
+      return;
+    segment.startPTS_ = add ? segment.startPTS_ + shift : segment.startPTS_ - shift;
+    segment.m_endPts = add ? segment.m_endPts + shift : segment.m_endPts - shift;
+    aligned.Add(segment);
+  }
+  refreshed.Swap(aligned);
+}
+
 // \brief Parse a tag (e.g. #EXT-X-VERSION:1) to extract name and value
 void ParseTagNameValue(const std::string& line, std::string& tagName, std::string& tagValue)
 {
@@ -423,10 +465,11 @@ void adaptive::CHLSTree::FixDiscSequence(std::stringstream& streamData, uint32_t
   }
 }
 
-bool adaptive::CHLSTree::ProcessChildManifest(PLAYLIST::CPeriod* period,
-                                              PLAYLIST::CAdaptationSet* adp,
-                                              PLAYLIST::CRepresentation* rep,
-                                              uint64_t currentSegNumber /* = PLAYLIST::SEGMENT_NO_NUMBER */)
+bool adaptive::CHLSTree::ProcessChildManifest(
+    PLAYLIST::CPeriod* period,
+    PLAYLIST::CAdaptationSet* adp,
+    PLAYLIST::CRepresentation* rep,
+    uint64_t currentSegNumber /* = PLAYLIST::SEGMENT_NO_NUMBER */)
 {
   ParseStatus status = ParseStatus::INVALID;
   size_t maxInvalidStatus = 3;
@@ -463,7 +506,7 @@ bool adaptive::CHLSTree::ProcessChildManifest(PLAYLIST::CPeriod* period,
   return status == ParseStatus::SUCCESS;
 }
 
- adaptive::CHLSTree::ParseStatus adaptive::CHLSTree::ParseChildManifest(
+adaptive::CHLSTree::ParseStatus adaptive::CHLSTree::ParseChildManifest(
     const std::string& data,
     std::string_view sourceUrl,
     PLAYLIST::CPeriod* period,
@@ -675,6 +718,25 @@ bool adaptive::CHLSTree::ProcessChildManifest(PLAYLIST::CPeriod* period,
         const CSegment* lastSeg = newSegments.GetBack();
         if (lastSeg)
           startPts = lastSeg->m_endPts;
+        else if (GetSegmentCache() && m_isLive)
+        {
+          // Discontinuity periods without PROGRAM-DATE-TIME otherwise restart
+          // at zero and overlap the earlier replay timeline.
+          auto periodIt = std::find_if(m_periods.begin(), m_periods.end(),
+                                       [period](const auto& item) { return item.get() == period; });
+          if (periodIt != m_periods.begin() && periodIt != m_periods.end())
+          {
+            const auto& previousAdps = std::prev(periodIt)->get()->GetAdaptationSets();
+            if (adpSetPos < previousAdps.size() &&
+                reprPos < previousAdps[adpSetPos]->GetRepresentations().size())
+            {
+              const CSegment* previousLast =
+                  previousAdps[adpSetPos]->GetRepresentations()[reprPos]->Timeline().GetBack();
+              if (previousLast)
+                startPts = previousLast->m_endPts;
+            }
+          }
+        }
       }
 
       newSegment->startPTS_ = startPts;
@@ -711,7 +773,10 @@ bool adaptive::CHLSTree::ProcessChildManifest(PLAYLIST::CPeriod* period,
         for (auto itPeriod = m_periods.begin(); itPeriod != m_periods.end();)
         {
           const uint32_t periodSeq = itPeriod->get()->GetSequence();
-          if (periodSeq < discontSeq)
+          if (periodSeq < discontSeq &&
+              (!GetSegmentCache() ||
+               !GetSegmentCache()->HasPeriod(itPeriod->get()->GetStart(), itPeriod->get()->GetId(),
+                                             itPeriod->get()->GetSequence())))
           {
             // Period sequence can be equal to current (is use) sequence when:
             // 1) If you pause the video and after some time you want to continue the playback,
@@ -782,7 +847,12 @@ bool adaptive::CHLSTree::ProcessChildManifest(PLAYLIST::CPeriod* period,
         // Update MEDIA-SEQUENCE for next period
         mediaSequenceNbr += newSegments.GetSize();
 
+        if (GetSegmentCache() && m_isLive)
+          AlignCachedLiveTimeline(rep->Timeline(), newSegments);
         rep->Timeline().Swap(newSegments);
+        RestoreCachedSegments(period, adp, rep);
+        if (const CSegment* first = rep->Timeline().GetFront())
+          rep->SetStartNumber(first->m_number);
       }
 
       isSkipUntilDiscont = false;
@@ -791,6 +861,7 @@ bool adaptive::CHLSTree::ProcessChildManifest(PLAYLIST::CPeriod* period,
       currentSegNumber = mediaSequenceNbr;
 
       CPeriod* newPeriod = FindDiscontinuityPeriod(m_discontSeq.value_or(0) + discontCount);
+      const bool isNewPeriod = !newPeriod;
 
       if (!newPeriod) // Create new period
       {
@@ -803,7 +874,8 @@ bool adaptive::CHLSTree::ProcessChildManifest(PLAYLIST::CPeriod* period,
         m_periods.push_back(std::move(newPeriodPtr));
       }
 
-      newPeriod->SetStart(0);
+      if (isNewPeriod || !GetSegmentCache())
+        newPeriod->SetStart(0);
 
       CAdaptationSet* newAdpSet = newPeriod->GetAdaptationSets()[adpSetPos].get();
       CRepresentation* newRep = newAdpSet->GetRepresentations()[reprPos].get();
@@ -870,22 +942,26 @@ bool adaptive::CHLSTree::ProcessChildManifest(PLAYLIST::CPeriod* period,
     rep->AddDrmInfo(info.second);
   }
 
+  period->SetSequence(m_discontSeq.value_or(0) + discontCount);
+
+  if (GetSegmentCache() && m_isLive)
+    AlignCachedLiveTimeline(rep->Timeline(), newSegments);
   rep->Timeline().Clear();
   rep->Timeline().Swap(newSegments);
+  RestoreCachedSegments(period, adp, rep);
   rep->SetStartNumber(mediaSequenceNbr);
-
-  period->SetSequence(m_discontSeq.value_or(0) + discontCount);
+  if (const CSegment* first = rep->Timeline().GetFront())
+    rep->SetStartNumber(first->m_number);
 
   if (adp->GetStreamType() != StreamType::SUBTITLE)
   {
     uint64_t periodDuration =
-        (rep->Timeline().GetDuration() * m_periods[discontCount]->GetTimescale()) /
-        rep->GetTimescale();
+        (rep->Timeline().GetDuration() * period->GetTimescale()) / rep->GetTimescale();
 
     if (hasEndList)
-      m_periods[discontCount]->SetDuration(periodDuration);
+      period->SetDuration(periodDuration);
 
-    m_periods[discontCount]->SetTlDuration(periodDuration);
+    period->SetTlDuration(periodDuration);
   }
 
   uint64_t totalTimeMs{0};
@@ -905,8 +981,7 @@ void adaptive::CHLSTree::PrepareSegments(PLAYLIST::CPeriod* period,
                                          PLAYLIST::CRepresentation* rep,
                                          uint64_t segNumber)
 {
-  if (segNumber == 0 || segNumber < rep->GetStartNumber() ||
-      segNumber == SEGMENT_NO_NUMBER)
+  if (segNumber == 0 || segNumber < rep->GetStartNumber() || segNumber == SEGMENT_NO_NUMBER)
   {
     rep->current_segment_.reset();
   }
@@ -1006,9 +1081,8 @@ void adaptive::CHLSTree::OnDataArrived(uint64_t segNum,
     // Decrypter needs preallocated data
     segBuffer.resize(srcDataSize);
 
-    m_decrypter->decrypt(aesKey->key.data(), iv,
-                         reinterpret_cast<const AP4_UI08*>(srcData), segBuffer, segBufferSize,
-                         srcDataSize, isLastChunk);
+    m_decrypter->decrypt(aesKey->key.data(), iv, reinterpret_cast<const AP4_UI08*>(srcData),
+                         segBuffer, segBufferSize, srcDataSize, isLastChunk);
     if (srcDataSize >= 16)
       memcpy(iv, srcData + (srcDataSize - 16), 16);
   }
@@ -1031,10 +1105,10 @@ void adaptive::CHLSTree::OnStreamChange(PLAYLIST::CPeriod* period,
 }
 
 void adaptive::CHLSTree::OnAlignSegment(PLAYLIST::CPeriod* period,
-                                           PLAYLIST::CAdaptationSet* adp,
-                                           PLAYLIST::CRepresentation* previousRep,
-                                           PLAYLIST::CRepresentation* nextRep,
-                                           const PLAYLIST::CSegment*& seg)
+                                        PLAYLIST::CAdaptationSet* adp,
+                                        PLAYLIST::CRepresentation* previousRep,
+                                        PLAYLIST::CRepresentation* nextRep,
+                                        const PLAYLIST::CSegment*& seg)
 {
   if (nextRep->IsIncludedStream())
     return;
@@ -1236,7 +1310,7 @@ void adaptive::CHLSTree::ProcessEncryption(
   // WIDEVINE
   else if (STRING::CompareNoCase(keyFormat, DRM::URN_WIDEVINE))
   {
-    
+
     DRM::DRMInfo& drmInfo = drmInfos[DRM::KS_WIDEVINE]; // Create or update
     drmInfo.keySystem = DRM::KS_WIDEVINE;
     drmInfo.initData = uriData;
@@ -1694,7 +1768,8 @@ bool adaptive::CHLSTree::ParseMultivariantPlaylist(const std::string& data)
         colorTRC = ColorTRC::ARIB_STD_B67;
 
       // Find existing adaptation set with same codec fourcc ...
-      CAdaptationSet* adpSet = CAdaptationSet::FindByCodec(period->GetAdaptationSets(), codecFourcc, colorTRC);
+      CAdaptationSet* adpSet =
+          CAdaptationSet::FindByCodec(period->GetAdaptationSets(), codecFourcc, colorTRC);
       if (!adpSet) // ... or create a new one
       {
         auto newAdpSet = CAdaptationSet::MakeUniquePtr(period.get());
@@ -1762,7 +1837,8 @@ void adaptive::CHLSTree::SaveManifest(PLAYLIST::CAdaptationSet* adpSet,
   AdaptiveTree::SaveManifest(fileNameSuffix, data, info);
 }
 
-void adaptive::CHLSTree::AddIncludedAudioStream(std::unique_ptr<PLAYLIST::CPeriod>& period, std::string codec)
+void adaptive::CHLSTree::AddIncludedAudioStream(std::unique_ptr<PLAYLIST::CPeriod>& period,
+                                                std::string codec)
 {
   auto newAdpSet = CAdaptationSet::MakeUniquePtr(period.get());
   newAdpSet->SetStreamType(StreamType::AUDIO);
@@ -1811,9 +1887,8 @@ PLAYLIST::CPeriod* adaptive::CHLSTree::FindDiscontinuityPeriod(const uint32_t se
 const adaptive::CHLSTree::Variant* adaptive::CHLSTree::FindVariantByAudioGroupId(
     std::string groupId, std::vector<Variant>& variants) const
 {
-  auto itVar =
-      std::find_if(variants.cbegin(), variants.cend(),
-                   [&groupId](const Variant& item) { return item.m_groupIdAudio == groupId; });
+  auto itVar = std::find_if(variants.cbegin(), variants.cend(), [&groupId](const Variant& item)
+                            { return item.m_groupIdAudio == groupId; });
   if (itVar != variants.cend())
     return &(*itVar);
 
@@ -1823,9 +1898,8 @@ const adaptive::CHLSTree::Variant* adaptive::CHLSTree::FindVariantByAudioGroupId
 const adaptive::CHLSTree::Variant* adaptive::CHLSTree::FindVariantBySubtitleGroupId(
     std::string groupId, std::vector<Variant>& variants) const
 {
-  auto itVar =
-      std::find_if(variants.cbegin(), variants.cend(),
-                   [&groupId](const Variant& item) { return item.m_groupIdSubtitles == groupId; });
+  auto itVar = std::find_if(variants.cbegin(), variants.cend(), [&groupId](const Variant& item)
+                            { return item.m_groupIdSubtitles == groupId; });
   if (itVar != variants.cend())
     return &(*itVar);
 

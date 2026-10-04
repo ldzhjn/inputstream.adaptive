@@ -64,6 +64,8 @@ enum class EVENT_TYPE
      * \brief Disable current representation, wait the current download is finished and stop downloads.
      */
     void Stop();
+    void CancelPendingRead();
+    void SetSeekMode(bool seeking) { m_isSeeking = seeking; }
     void clear();
     /*!
      * \brief Dispose resources.
@@ -259,10 +261,11 @@ enum class EVENT_TYPE
 
     private:
       std::thread m_downloadThread;
-      bool m_isThreadExit{false};
+      std::atomic<bool> m_isThreadExit{false};
       std::atomic<ThState> m_state = ThState::STOPPED;
     };
     THREADDATA* thread_data_{nullptr};
+    std::atomic<bool> m_isSeeking{false};
 
     AdaptiveTree* m_tree;
     AdaptiveStreamObserver* observer_{nullptr};

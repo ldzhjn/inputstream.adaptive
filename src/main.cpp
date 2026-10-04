@@ -52,12 +52,20 @@ bool CInputStreamAdaptive::Open(const kodi::addon::InputstreamProperty& props)
     m_session = nullptr;
     return false;
   }
+  {
+    std::lock_guard<std::mutex> lock(m_abortSessionMutex);
+    m_abortSession = m_session;
+  }
   return true;
 }
 
 void CInputStreamAdaptive::Close(void)
 {
   LOG::Log(LOGDEBUG, "Close()");
+  {
+    std::lock_guard<std::mutex> lock(m_abortSessionMutex);
+    m_abortSession.reset();
+  }
   m_session = nullptr;
   UTILS::THREAD::GlobalThreadPool.Reset();
   CSrvBroker::GetInstance()->Deinitialize();
@@ -327,6 +335,15 @@ bool CInputStreamAdaptive::OpenStream(int streamid)
   return isInfoChanged;
 }
 
+void CInputStreamAdaptive::DemuxAbort()
+{
+  // The lock protects only this atomic flag update against Close. It never
+  // covers network operations, readers, or stream teardown.
+  std::lock_guard<std::mutex> lock(m_abortSessionMutex);
+  if (m_abortSession)
+    m_abortSession->Abort();
+}
+
 DEMUX_PACKET* CInputStreamAdaptive::DemuxRead(void)
 {
   if (!m_session)
@@ -467,16 +484,22 @@ bool CInputStreamAdaptive::PosTime(int ms)
   if (m_session->SeekTime(static_cast<double>(ms) * 0.001f, isError))
     return true;
 
-  if (!isError)
+  if (m_session->IsAborted())
+    return false;
+
+  if (!isError || m_session->IsLive())
   {
-    // If for some reason the seek operation fails without errors
-    // try to restore the streams/readers to previous (current) position
+    // A live segment failure can recover at the previous playback position.
     LOG::Log(LOGWARNING, "PosTime - Seek failed. Attempt to restore previous %llu ms position",
              currentTimeMs);
 
+    isError = false;
     if (m_session->SeekTime(static_cast<double>(currentTimeMs) * 0.001f, isError))
       return false; // returns false because the initially requested seek was unsuccessful
   }
+
+  if (m_session->IsAborted())
+    return false;
 
   // A problem has occurred or EOS, force stop playback
   LOG::Log(LOGDEBUG, "PosTime - Cannot seek at %d ms position.", ms);

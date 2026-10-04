@@ -88,6 +88,11 @@ public:
 
   virtual TreeType GetTreeType() const { return TreeType::UNKNOWN; }
 
+  // Kodi may abort a blocked demux operation from another thread. Readers and
+  // downloads observe this marker without touching the mutable stream list.
+  void RequestAbort() { m_isAborted.store(true, std::memory_order_relaxed); }
+  bool IsAborted() const { return m_isAborted.load(std::memory_order_relaxed); }
+
   /*!
    * \brief Configure the adaptive tree.
    * \param reprChooser The representation chooser
@@ -465,6 +470,7 @@ protected:
   bool m_isReqPrepareStream{false};
 
 private:
+  std::atomic<bool> m_isAborted{false};
   std::shared_ptr<const ChaptersSnapshot> m_chaptersSnapshot{
       std::make_shared<const ChaptersSnapshot>()};
   // Guards the m_chaptersSnapshot pointer only, never held while doing any work

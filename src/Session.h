@@ -33,6 +33,14 @@ public:
 
   void DeleteStreams();
 
+  void Abort()
+  {
+    if (m_adaptiveTree)
+      m_adaptiveTree->RequestAbort();
+  }
+
+  bool IsAborted() const { return m_adaptiveTree && m_adaptiveTree->IsAborted(); }
+
   /*! \brief Initialize the session
    *  \param manifestUrl The manifest URL
    *  \return True if has success, false otherwise

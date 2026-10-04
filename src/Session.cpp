@@ -967,8 +967,22 @@ bool SESSION::CSession::GetNextSample(ISampleReader*& sampleReader)
 
 bool SESSION::CSession::SeekTime(double seekTime, bool& isError)
 {
-  if (m_streams.empty())
+  if (m_streams.empty() || IsAborted())
     return false;
+
+  bool hasPendingRead = false;
+  for (const auto& stream : m_streams)
+    if (stream->IsEnabled() && stream->GetReader() &&
+        stream->GetReader()->IsReadSampleAsyncWorking())
+      hasPendingRead = true;
+
+  if (hasPendingRead)
+  {
+    // Cancel old reads before waiting for them; their download may be stalled.
+    for (auto& stream : m_streams)
+      if (stream->IsEnabled())
+        stream->m_adStream.CancelPendingRead();
+  }
 
   for (auto& stream : m_streams)
     stream->m_lastEmittedDtsManifest.reset();
@@ -1079,8 +1093,20 @@ bool SESSION::CSession::SeekTime(double seekTime, bool& isError)
       continue;
 
     streamReader->WaitReadSampleAsyncComplete();
+    if (IsAborted())
+      return false;
     if (!stream->IsEnabled())
       continue;
+
+    struct SeekModeGuard
+    {
+      adaptive::AdaptiveStream& stream;
+      explicit SeekModeGuard(adaptive::AdaptiveStream& value) : stream(value)
+      {
+        stream.SetSeekMode(true);
+      }
+      ~SeekModeGuard() { stream.SetSeekMode(false); }
+    } seekMode(stream->m_adStream);
 
     const uint64_t seekTimePts = seekTimeCorrected + stream->m_adStream.GetAbsolutePTSOffset();
 

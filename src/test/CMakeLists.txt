@@ -6,6 +6,7 @@ add_definitions(-DINPUTSTREAM_TEST_BUILD)
 
 add_executable(${BINARY}
     TestMain.cpp
+    TestAdaptiveStream.cpp
     TestDASHTree.cpp
     TestHLSTree.cpp
     TestSmoothTree.cpp

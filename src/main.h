@@ -15,6 +15,7 @@
 
 #include <map>
 #include <memory>
+#include <mutex>
 
 /*******************************************************/
 /*                     InputStream                     */
@@ -34,6 +35,7 @@ public:
   bool GetStream(int streamid, kodi::addon::InputstreamInfo& info) override;
   void EnableStream(int streamid, bool enable) override;
   bool OpenStream(int streamid) override;
+  void DemuxAbort() override;
   DEMUX_PACKET* DemuxRead() override;
   bool DemuxSeekTime(double time, bool backwards, double& startpts) override;
   void SetVideoResolution(unsigned int width,
@@ -57,6 +59,9 @@ public:
 
 private:
   std::shared_ptr<SESSION::CSession> m_session;
+  // Guard abort publication and Close separately from the player callbacks.
+  std::shared_ptr<SESSION::CSession> m_abortSession;
+  std::mutex m_abortSessionMutex;
 
   bool m_checkCoreReopen{false}; // Check if Kodi core will reopen all streams
 };

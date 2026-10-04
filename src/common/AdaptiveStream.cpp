@@ -93,7 +93,9 @@ bool adaptive::AdaptiveStream::DownloadSegment(const DownloadInfo& downloadInfo)
 bool adaptive::AdaptiveStream::DownloadImpl(const DownloadInfo& downloadInfo,
                                             std::vector<uint8_t>* downloadData)
 {
-  if (downloadInfo.m_url.empty())
+  if (downloadInfo.m_url.empty() || m_tree->IsAborted() ||
+      (downloadInfo.m_segmentBuffer &&
+       thread_data_->State() == THREADDATA::ThState::STOPPED))
     return false;
 
   std::string url = downloadInfo.m_url;
@@ -141,7 +143,7 @@ bool adaptive::AdaptiveStream::DownloadImpl(const DownloadInfo& downloadInfo,
           bool isLastChunk = !isChunked && curl.IsEOF();
 
           // The status can be changed after waiting for the lock_guard e.g. video seek/stop
-          if (thread_data_->State() == THREADDATA::ThState::STOPPED)
+          if (thread_data_->State() == THREADDATA::ThState::STOPPED || m_tree->IsAborted())
             break;
 
           std::vector<uint8_t> bufferOutput;
@@ -151,7 +153,10 @@ bool adaptive::AdaptiveStream::DownloadImpl(const DownloadInfo& downloadInfo,
                                 bufferData.data(), bytesRead, bufferOutput,
                                 downloadInfo.m_segmentBuffer->BufferSize(), isLastChunk);
 
-          downloadInfo.m_segmentBuffer->AppendBuffer(bufferOutput);
+          {
+            std::lock_guard<std::mutex> lckrw(thread_data_->mutexRW);
+            downloadInfo.m_segmentBuffer->AppendBuffer(bufferOutput);
+          }
           thread_data_->cvRW.notify_all();
         }
       }
@@ -276,7 +281,8 @@ bool adaptive::AdaptiveStream::AlignBufferToSegment(const PLAYLIST::CSegment& se
 {
   if (m_segBuffers.ContainsSegment(segment))
   {
-    thread_data_->PauseDownloads();
+    if (thread_data_->State() == THREADDATA::ThState::RUNNING)
+      thread_data_->PauseDownloads();
     // Check if there is a download in progress and if its PTS
     // is older than the requested segment, if so immediately stop the download
     std::unique_lock<std::mutex> lckWorker(thread_data_->mutexWorker, std::try_to_lock);
@@ -308,6 +314,10 @@ bool adaptive::AdaptiveStream::AlignBufferToSegment(const PLAYLIST::CSegment& se
       else
         break;
     }
+
+    if (thread_data_->State() == THREADDATA::ThState::STOPPED ||
+        (!m_segBuffers.IsEmpty() && m_segBuffers.Front().State() == BufferState::INVALID))
+      m_segBuffers.Reset();
   }
   else
   {
@@ -346,6 +356,9 @@ void adaptive::AdaptiveStream::worker()
     if (!thread_data_->IsThreadExit())
     {
       std::lock_guard<std::mutex> lckWorker(thread_data_->mutexWorker);
+      if (thread_data_->State() != THREADDATA::ThState::RUNNING ||
+          thread_data_->IsThreadExit())
+        continue;
 
       DownloadInfo downloadInfo;
       if (!PrepareNextDownload(downloadInfo))
@@ -374,11 +387,12 @@ void adaptive::AdaptiveStream::worker()
 
       // Download errors may occur e.g. due to unstable connection, server overloading, ...
       // then we try downloading the segment more times before aborting playback
-      while (thread_data_->State() != THREADDATA::ThState::STOPPED)
+      while (thread_data_->State() != THREADDATA::ThState::STOPPED && !m_tree->IsAborted())
       {
         isSegmentDownloaded = DownloadSegment(downloadInfo);
-        if (isSegmentDownloaded || downloadAttempts == maxAttempts ||
-            thread_data_->State() == THREADDATA::ThState::STOPPED)
+        if (isSegmentDownloaded || (m_tree->IsLive() && m_isSeeking) ||
+            downloadAttempts == maxAttempts ||
+            thread_data_->State() == THREADDATA::ThState::STOPPED || m_tree->IsAborted())
           break;
 
         //! @todo: forcing thread sleep block the thread also while the state_ / thread_stop_ change values
@@ -389,16 +403,19 @@ void adaptive::AdaptiveStream::worker()
                  downloadAttempts);
       }
 
-      m_segBuffers.NotifyDownloadCompleted();
-      downloadInfo.m_segmentBuffer->ChangeState(isSegmentDownloaded ? BufferState::DOWNLOADED
-                                                                    : BufferState::INVALID);
-
-      // Stop the playback if the data cant be downloaded
-      // is not the case for subtitles where in the case of missing files they can be ignored
-      if (!isSegmentDownloaded && current_adp_->GetStreamType() != StreamType::SUBTITLE)
       {
-        // Download cancelled or cannot download the file
-        thread_data_->StopDownloads();
+        std::lock_guard<std::mutex> lckrw(thread_data_->mutexRW);
+        m_segBuffers.NotifyDownloadCompleted();
+        downloadInfo.m_segmentBuffer->ChangeState(isSegmentDownloaded ? BufferState::DOWNLOADED
+                                                                      : BufferState::INVALID);
+
+        // Stop the playback if the data cant be downloaded
+        // is not the case for subtitles where in the case of missing files they can be ignored
+        if (!isSegmentDownloaded && current_adp_->GetStreamType() != StreamType::SUBTITLE)
+        {
+          // Download cancelled or cannot download the file
+          thread_data_->StopDownloads();
+        }
       }
 
       thread_data_->cvRW.notify_all();
@@ -808,6 +825,8 @@ bool adaptive::AdaptiveStream::start_stream()
 
 bool adaptive::AdaptiveStream::ensureSegment()
 {
+  if (m_tree->IsAborted())
+    return false;
   // NOTE: Some demuxers may call ensureSegment more times to try make more attempts when it return false.
 
   // This method can be called more times so prevent to switch to other segments when stream quality change has been requested
@@ -1053,20 +1072,24 @@ uint32_t adaptive::AdaptiveStream::read(void* buffer, uint32_t bytesToRead)
 
     SegmentBuffer& currSegBuffer = m_segBuffers.Front();
 
-    size_t avail = currSegBuffer.BufferSize() - segment_read_pos_;
+    size_t avail;
 
     {
       std::unique_lock<std::mutex> lckrw(thread_data_->mutexRW);
+      avail = currSegBuffer.BufferSize() - segment_read_pos_;
       // Wait until we have all data from the chunked download
       while (avail < bytesToRead &&
              (currSegBuffer.State() == BufferState::QUEUED ||
               currSegBuffer.State() == BufferState::DOWNLOADING) &&
-             thread_data_->State() == THREADDATA::ThState::RUNNING)
+             thread_data_->State() == THREADDATA::ThState::RUNNING && !m_tree->IsAborted())
       {
-        thread_data_->cvRW.wait(lckrw);
+        thread_data_->cvRW.wait_for(lckrw, 100ms);
         avail = currSegBuffer.BufferSize() - segment_read_pos_;
       }
     }
+
+    if (thread_data_->State() == THREADDATA::ThState::STOPPED || m_tree->IsAborted())
+      return 0;
 
     if (avail > bytesToRead)
       avail = bytesToRead;
@@ -1098,10 +1121,16 @@ bool adaptive::AdaptiveStream::ReadFullBuffer(std::vector<uint8_t>& buffer)
       // Wait until we have all data from the chunked download
       while ((currSegBuffer.State() == BufferState::QUEUED ||
               currSegBuffer.State() == BufferState::DOWNLOADING) &&
-             thread_data_->State() == THREADDATA::ThState::RUNNING)
+             thread_data_->State() == THREADDATA::ThState::RUNNING && !m_tree->IsAborted())
       {
-        thread_data_->cvRW.wait(lckrw);
+        thread_data_->cvRW.wait_for(lckrw, 100ms);
       }
+    }
+
+    if (thread_data_->State() == THREADDATA::ThState::STOPPED || m_tree->IsAborted())
+    {
+      buffer.clear();
+      return false;
     }
 
     buffer = currSegBuffer.ReadBuffer();
@@ -1184,12 +1213,15 @@ bool adaptive::AdaptiveStream::seek(uint64_t const pos, bool& isEos)
       while (pos > (absolute_position_ - segment_read_pos_) + currSegBuffer.BufferSize() &&
              (currSegBuffer.State() == BufferState::QUEUED ||
               currSegBuffer.State() == BufferState::DOWNLOADING) &&
-             thread_data_->State() == THREADDATA::ThState::RUNNING)
+             thread_data_->State() == THREADDATA::ThState::RUNNING && !m_tree->IsAborted())
       {
-        thread_data_->cvRW.wait(lckrw);
+        thread_data_->cvRW.wait_for(lckrw, 100ms);
       }
     }
   }
+
+  if (thread_data_->State() == THREADDATA::ThState::STOPPED || m_tree->IsAborted())
+    return false;
 
   segment_read_pos_ = static_cast<size_t>(pos - (absolute_position_ - segment_read_pos_));
 
@@ -1441,7 +1473,7 @@ void adaptive::AdaptiveStream::Stop()
   if (thread_data_)
   {
     // Stop downloads
-    thread_data_->StopDownloads();
+    CancelPendingRead();
     // Wait that worker exit
     std::lock_guard<std::mutex> lckWorker(thread_data_->mutexWorker);
   }
@@ -1452,6 +1484,18 @@ void adaptive::AdaptiveStream::Stop()
     current_rep_->SetIsEnabled(false);
 
   m_isWaitingForSegment = false;
+}
+
+void adaptive::AdaptiveStream::CancelPendingRead()
+{
+  if (!thread_data_)
+    return;
+
+  {
+    std::lock_guard<std::mutex> lckrw(thread_data_->mutexRW);
+    thread_data_->StopDownloads();
+  }
+  thread_data_->cvRW.notify_all();
 }
 
 void adaptive::AdaptiveStream::clear()
@@ -1466,7 +1510,13 @@ void adaptive::AdaptiveStream::clear()
 
 void adaptive::AdaptiveStream::Dispose()
 {
-  m_segBuffers.Reset();
+  if (thread_data_)
+  {
+    std::lock_guard<std::mutex> lckWorker(thread_data_->mutexWorker);
+    m_segBuffers.Reset();
+  }
+  else
+    m_segBuffers.Reset();
 
   segment_read_pos_ = 0;
   absolute_position_ = 0;

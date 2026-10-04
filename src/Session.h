@@ -117,6 +117,7 @@ public:
    *  \return The elapsed time in ms of the stream including all chapters
    */
   uint64_t GetElapsedTimeMs() const { return m_elapsedTime / 1000; };
+  std::vector<std::pair<int64_t, int64_t>> GetCachedRangesMs() const;
 
   /*! \brief Check if the stream has changed, reset changed status
    *  \param bSet True to keep m_changed value true

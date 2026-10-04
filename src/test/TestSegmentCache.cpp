@@ -205,3 +205,41 @@ TEST(SegmentCache, RetainsOnlyDownloadedTimelineAcrossUrlRefreshAndEviction)
       std::filesystem::remove(root);
   }
 }
+
+TEST(SegmentCache, ReportsOnlyResidentVideoIntervalsAndGaps)
+{
+  for (const auto mode : {SegmentCache::Mode::MEMORY, SegmentCache::Mode::DISK})
+  {
+    const auto root = std::filesystem::temp_directory_path() /
+                      ("isa-cache-ranges-" +
+                       std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    {
+      SegmentCache cache{mode, 3, root};
+      ASSERT_TRUE(cache.IsAvailable());
+      auto add = [&](uint64_t number, uint64_t begin, uint64_t end, bool video)
+      {
+        SegmentCache::Key key{std::to_string(number), {}, number, begin};
+        key.cacheStartUs = begin;
+        key.cacheEndUs = end;
+        key.isVideo = video;
+        PLAYLIST::CSegment segment;
+        segment.m_number = number;
+        segment.startPTS_ = begin;
+        segment.m_endPts = end;
+        cache.Put(std::move(key), {1}, {}, segment);
+      };
+      add(1, 0, 1000000, true);
+      add(2, 1000000, 2000000, true);
+      add(3, 500000, 1500000, false);
+      EXPECT_EQ(cache.GetCachedRanges(),
+                (std::vector<std::pair<uint64_t, uint64_t>>{{0, 2000000}}));
+
+      add(4, 3000000, 4000000, true); // Evicts the first video interval.
+      EXPECT_EQ(cache.GetCachedRanges(),
+                (std::vector<std::pair<uint64_t, uint64_t>>{{1000000, 2000000},
+                                                            {3000000, 4000000}}));
+    }
+    if (mode == SegmentCache::Mode::DISK)
+      std::filesystem::remove(root);
+  }
+}

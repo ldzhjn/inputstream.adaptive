@@ -266,3 +266,31 @@ bool SegmentCache::HasPeriod(uint64_t periodStart,
                               entry.key.periodSequence == periodSequence;
                      });
 }
+
+std::vector<std::pair<uint64_t, uint64_t>> SegmentCache::GetCachedRanges() const
+{
+  std::vector<std::pair<uint64_t, uint64_t>> video;
+  std::vector<std::pair<uint64_t, uint64_t>> audio;
+  std::lock_guard lock(m_mutex);
+  for (const Entry& entry : m_entries)
+  {
+    if (!entry.segment || entry.segment->IsInitialization() ||
+        entry.key.cacheEndUs <= entry.key.cacheStartUs)
+      continue;
+    (entry.key.isVideo ? video : audio)
+        .emplace_back(entry.key.cacheStartUs, entry.key.cacheEndUs);
+  }
+
+  auto& ranges = video.empty() ? audio : video;
+  std::sort(ranges.begin(), ranges.end());
+  size_t out = 0;
+  for (const auto& range : ranges)
+  {
+    if (out && range.first <= ranges[out - 1].second + 100000)
+      ranges[out - 1].second = std::max(ranges[out - 1].second, range.second);
+    else
+      ranges[out++] = range;
+  }
+  ranges.resize(out);
+  return ranges;
+}

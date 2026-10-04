@@ -45,6 +45,9 @@ public:
     uint64_t periodStart{0};
     std::string adaptationId;
     std::string representationId;
+    uint64_t cacheStartUs{0};
+    uint64_t cacheEndUs{0};
+    bool isVideo{false};
 
     bool operator==(const Key& other) const
     {
@@ -89,6 +92,7 @@ public:
                                               const std::string& adaptationId,
                                               const std::string& representationId);
   bool HasPeriod(uint64_t periodStart, const std::string& periodId, uint32_t periodSequence);
+  std::vector<std::pair<uint64_t, uint64_t>> GetCachedRanges() const;
 
 private:
   struct Entry
@@ -111,6 +115,6 @@ private:
   uint64_t m_nextFileId{0};
   std::filesystem::path m_diskDirectory;
   std::list<Entry> m_entries;
-  std::mutex m_mutex;
+  mutable std::mutex m_mutex;
 };
 } // namespace ADP

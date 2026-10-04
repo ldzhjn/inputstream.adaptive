@@ -1465,3 +1465,23 @@ uint64_t SESSION::CSession::GetMediaDurationMs() const
 
   return m_timingStream->m_adStream.getMaxTimeMs();
 }
+
+std::vector<std::pair<int64_t, int64_t>> SESSION::CSession::GetCachedRangesMs() const
+{
+  std::vector<std::pair<int64_t, int64_t>> result;
+  if (!m_adaptiveTree || !m_adaptiveTree->IsLive() || !m_adaptiveTree->GetSegmentCache())
+    return result;
+  const uint64_t anchor = m_adaptiveTree->GetCachePlaybackStartPts();
+  if (anchor == PLAYLIST::NO_VALUE)
+    return result;
+  for (const auto& [begin, end] : m_adaptiveTree->GetSegmentCache()->GetCachedRanges())
+  {
+    if (end <= anchor)
+      continue;
+    result.emplace_back(static_cast<int64_t>((std::max(begin, anchor) - anchor) / 1000),
+                        static_cast<int64_t>((end - anchor) / 1000));
+  }
+  if (result.size() > 32)
+    result.erase(result.begin(), result.end() - 32);
+  return result;
+}

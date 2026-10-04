@@ -267,6 +267,18 @@ bool adaptive::AdaptiveStream::DownloadImpl(const DownloadInfo& downloadInfo,
           // completed metadata so an expired key URL does not break replay.
           const auto& segment = downloadInfo.m_segmentBuffer->segment;
           const std::optional<PLAYLIST::CSegment> timelineSegment = segment;
+          const uint64_t scale = downloadInfo.m_segmentBuffer->rep->GetTimescale();
+          if (scale && segment.m_endPts > segment.startPTS_)
+          {
+            const auto toUs = [scale](uint64_t pts)
+            {
+              return (pts / scale) * 1000000 + (pts % scale) * 1000000 / scale;
+            };
+            cacheKey.cacheStartUs = toUs(segment.startPTS_);
+            cacheKey.cacheEndUs = toUs(segment.m_endPts);
+            const auto type = current_adp_->GetStreamType();
+            cacheKey.isVideo = type == StreamType::VIDEO || type == StreamType::VIDEO_AUDIO;
+          }
           if (isAesSegment)
             cache->Put(std::move(cacheKey), std::move(cacheData), std::move(cacheChunks),
                        timelineSegment);

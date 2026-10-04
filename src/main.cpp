@@ -19,6 +19,16 @@
 using namespace PLAYLIST;
 using namespace SESSION;
 
+namespace
+{
+template<typename Times>
+void AddCachedRangeIfSupported(Times& times, int64_t begin, int64_t end)
+{
+  if constexpr (requires { times.AddCachedRange(begin, end); })
+    times.AddCachedRange(begin, end);
+}
+} // namespace
+
 CInputStreamAdaptive::CInputStreamAdaptive(const kodi::addon::IInstanceInfo& instance)
   : CInstanceInputStream(instance)
 {
@@ -116,6 +126,17 @@ void CInputStreamAdaptive::GetCapabilities(kodi::addon::InputstreamCapabilities&
   mask |= INPUTSTREAM_SUPPORTS_ICHAPTER;
 #endif
   caps.SetMask(mask);
+}
+
+bool CInputStreamAdaptive::GetTimes(kodi::addon::InputstreamTimes& times)
+{
+  if (!m_session)
+    return false;
+  // Kodi calls this separately for the optional local-cache overlay. Normal
+  // playback timing continues to use IDisplayTime and its existing PTS mapping.
+  for (const auto& [begin, end] : m_session->GetCachedRangesMs())
+    AddCachedRangeIfSupported(times, begin, end);
+  return true;
 }
 
 bool CInputStreamAdaptive::GetStream(int streamid, kodi::addon::InputstreamInfo& info)

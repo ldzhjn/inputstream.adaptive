@@ -28,6 +28,11 @@
 
 #include <algorithm>
 #include <cassert>
+#include <iterator>
+
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 
 using namespace adaptive;
 using namespace PLAYLIST;
@@ -37,6 +42,19 @@ using namespace UTILS;
 namespace
 {
 constexpr const char* CHAPTER_NAME_UNKNOWN = "[Unknown]";
+
+#if defined(TARGET_OS_TV) && TARGET_OS_TV
+bool IsUhd(const CRepresentation* repr)
+{
+  return repr->GetWidth() >= 3840 && repr->GetHeight() >= 2160;
+}
+
+bool IsVp9(CAdaptationSet* adp)
+{
+  return CODEC::Contains(adp->GetCodecs(), CODEC::FOURCC_VP09) ||
+         CODEC::Contains(adp->GetCodecs(), CODEC::NAME_VP9);
+}
+#endif
 
 // \brief Make an unique ID based on period index and stream index.
 // \param periodIndex The max value accepted by period index is uint16_t type max value.
@@ -190,6 +208,21 @@ SResult SESSION::CSession::Initialize(std::string manifestUrl)
 bool SESSION::CSession::CheckPlayableStreams(PLAYLIST::CPeriod* period)
 {
   auto& kodiPropCfg = CSrvBroker::GetKodiProps().GetConfig();
+
+#if defined(TARGET_OS_TV) && TARGET_OS_TV
+  // tvOS may fall back to software decoding for 2160p VP9, even when a 2160p AV1 stream exists.
+  for (auto& adp : period->GetAdaptationSets())
+  {
+    if (adp->GetStreamType() != StreamType::VIDEO || !IsVp9(adp.get()))
+      continue;
+
+    for (auto& repr : adp->GetRepresentations())
+    {
+      if (IsUhd(repr.get()))
+        repr->isPlayable = false;
+    }
+  }
+#endif
 
   if (kodiPropCfg.resolutionLimit == 0 &&
       kodiPropCfg.hdcpCheck == ADP::KODI_PROPS::HdcpCheckType::DEFAULT)
@@ -392,7 +425,7 @@ void SESSION::CSession::InitializePeriod()
     else
     {
       // Add the default stream representation only
-      if (!defaultRepr->isPlayable)
+      if (!defaultRepr || !defaultRepr->isPlayable)
         continue;
 
       if (!AddStreamRepr(defaultRepr))
@@ -415,6 +448,18 @@ void SESSION::CSession::InitializePeriod()
                      const bool bIsVideo = b && b->m_info.GetStreamType() == INPUTSTREAM_TYPE_VIDEO;
                      return aIsVideo && !bIsVideo;
                    });
+
+#if defined(TARGET_OS_TV) && TARGET_OS_TV
+  // Kodi may reopen the first video stream regardless of the default flag.
+  auto preferred = std::find_if(m_streams.begin(), m_streams.end(),
+                                [defVideoAdpSet](const std::shared_ptr<CStream>& stream)
+                                {
+                                  return stream->m_adStream.getAdaptationSet() == defVideoAdpSet &&
+                                         IsUhd(stream->m_adStream.getRepresentation());
+                                });
+  if (preferred != m_streams.end())
+    std::rotate(m_streams.begin(), preferred, std::next(preferred));
+#endif
 }
 
 void SESSION::CSession::AddStream(PLAYLIST::CAdaptationSet* adp,
@@ -1358,6 +1403,35 @@ PLAYLIST::CAdaptationSet* SESSION::CSession::DetermineDefaultAdpSet(PLAYLIST::CP
       CODEC::FOURCC_HEVC, CODEC::FOURCC_AV01, CODEC::NAME_AV1,    CODEC::FOURCC_VP09,
       CODEC::NAME_VP9,    CODEC::FOURCC_AVC_, CODEC::FOURCC_H264};
 
+#if defined(TARGET_OS_TV) && TARGET_OS_TV
+  const bool hasVp9Uhd = std::any_of(
+      period->GetAdaptationSets().begin(), period->GetAdaptationSets().end(),
+      [](const auto& adp)
+      {
+        return adp->GetStreamType() == StreamType::VIDEO && IsVp9(adp.get()) &&
+               std::any_of(adp->GetRepresentations().begin(), adp->GetRepresentations().end(),
+                           [](const auto& repr) { return IsUhd(repr.get()); });
+      });
+
+  if (hasVp9Uhd)
+  {
+    for (const auto& codecCC : videoCodecOrder)
+    {
+      if (codecCC == CODEC::FOURCC_VP09 || codecCC == CODEC::NAME_VP9)
+        continue;
+
+      for (auto& adp : period->GetAdaptationSets())
+      {
+        if (adp->GetStreamType() == StreamType::VIDEO && !IsVp9(adp.get()) &&
+            CODEC::Contains(adp->GetCodecs(), codecCC) &&
+            std::any_of(adp->GetRepresentations().begin(), adp->GetRepresentations().end(),
+                        [](const auto& repr) { return repr->isPlayable && IsUhd(repr.get()); }))
+          return adp.get();
+      }
+    }
+  }
+#endif
+
   CAdaptationSet* defaultAdp{nullptr}; // Default determined by codec order
 
   for (auto& codecCC : videoCodecOrder)
@@ -1390,4 +1464,24 @@ uint64_t SESSION::CSession::GetMediaDurationMs() const
     return 0;
 
   return m_timingStream->m_adStream.getMaxTimeMs();
+}
+
+std::vector<std::pair<int64_t, int64_t>> SESSION::CSession::GetCachedRangesMs() const
+{
+  std::vector<std::pair<int64_t, int64_t>> result;
+  if (!m_adaptiveTree || !m_adaptiveTree->IsLive() || !m_adaptiveTree->GetSegmentCache())
+    return result;
+  const uint64_t anchor = m_adaptiveTree->GetCachePlaybackStartPts();
+  if (anchor == PLAYLIST::NO_VALUE)
+    return result;
+  for (const auto& [begin, end] : m_adaptiveTree->GetSegmentCache()->GetCachedRanges())
+  {
+    if (end <= anchor)
+      continue;
+    result.emplace_back(static_cast<int64_t>((std::max(begin, anchor) - anchor) / 1000),
+                        static_cast<int64_t>((end - anchor) / 1000));
+  }
+  if (result.size() > 32)
+    result.erase(result.begin(), result.end() - 32);
+  return result;
 }

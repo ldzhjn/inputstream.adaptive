@@ -66,6 +66,11 @@ include_directories(${INCLUDES}
                     src/
 )
 
+# Allow the paired Kodi test build to supply its extended inputstream SDK.
+if(KODI_SOURCE_INCLUDE)
+  include_directories(BEFORE ${KODI_SOURCE_INCLUDE})
+endif()
+
 add_subdirectory(lib/mpegts)
 add_subdirectory(lib/webm_parser)
 

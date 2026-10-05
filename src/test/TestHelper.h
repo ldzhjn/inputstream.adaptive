@@ -17,6 +17,7 @@
 #include "../parser/SmoothTree.h"
 #include "../utils/log.h"
 
+#include <chrono>
 #include <condition_variable>
 #include <mutex>
 #include <string_view>
@@ -25,6 +26,40 @@ constexpr std::string_view URN_WIDEVINE = "urn:uuid:edef8ba9-79d6-4ace-a3c8-27dc
 
 std::string GetEnv(const std::string& var);
 void SetFileName(std::string& file, const std::string name);
+
+// The downloader records requests on its worker thread. Assertions read copied
+// strings after the corresponding download completes, without holding a vector
+// reference that can be invalidated by the next prefetched request.
+class TestDownloadLog
+{
+public:
+  void clear()
+  {
+    std::lock_guard lock(m_mutex);
+    m_urls.clear();
+  }
+  void push_back(const std::string& url)
+  {
+    {
+      std::lock_guard lock(m_mutex);
+      m_urls.push_back(url);
+    }
+    m_ready.notify_all();
+  }
+  std::string operator[](size_t index)
+  {
+    std::unique_lock lock(m_mutex);
+    if (!m_ready.wait_for(lock, std::chrono::seconds(1),
+                          [this, index] { return index < m_urls.size(); }))
+      return {};
+    return m_urls[index];
+  }
+
+private:
+  std::mutex m_mutex;
+  std::condition_variable m_ready;
+  std::vector<std::string> m_urls;
+};
 
 class testHelper
 {
@@ -38,7 +73,7 @@ public:
 
   static std::string testFile;
   static std::string effectiveUrl;
-  static std::vector<std::string> downloadList;
+  static TestDownloadLog downloadList;
 };
 
 class CTestRepresentationChooserDefault : public CHOOSER::CRepresentationChooserDefault

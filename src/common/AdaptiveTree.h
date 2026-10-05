@@ -357,6 +357,7 @@ public:
   struct ChapterInfo
   {
     std::string id;
+    uint16_t index{0};
     uint64_t tlDuration{0};
     uint64_t timescale{0};
   };
@@ -387,6 +388,7 @@ public:
    *        the Kodi core chapter callbacks will keep serving stale data.
    */
   void RefreshChaptersSnapshot();
+  uint64_t GetPeriodStartTimeUs(uint16_t periodIndex) const;
 
   /*!
    * \brief Specifies if TTML subtitle time is relative to sample time.

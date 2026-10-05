@@ -31,6 +31,9 @@ public:
   void Close() override;
   bool GetStreamIds(std::vector<unsigned int>& ids) override;
   void GetCapabilities(kodi::addon::InputstreamCapabilities& caps) override;
+#if INPUTSTREAM_VERSION_LEVEL >= 5
+  bool GetTimes(kodi::addon::InputstreamTimes& times) override;
+#endif
   bool GetStream(int streamid, kodi::addon::InputstreamInfo& info) override;
   void EnableStream(int streamid, bool enable) override;
   bool OpenStream(int streamid) override;

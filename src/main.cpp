@@ -118,6 +118,20 @@ void CInputStreamAdaptive::GetCapabilities(kodi::addon::InputstreamCapabilities&
   caps.SetMask(mask);
 }
 
+#if INPUTSTREAM_VERSION_LEVEL >= 5
+bool CInputStreamAdaptive::GetTimes(kodi::addon::InputstreamTimes& times)
+{
+  if (!m_session)
+    return false;
+  // Do not advertise ITIME: GetTimes serves the optional cache overlay only;
+  // IDisplayTime continues to own the existing playback/seek PTS mapping.
+  times.SetCachedRangesSupported(m_session->HasSegmentCache());
+  for (const auto& [begin, end] : m_session->GetCachedRangesMs())
+    times.AddCachedRange(begin, end);
+  return true;
+}
+#endif
+
 bool CInputStreamAdaptive::GetStream(int streamid, kodi::addon::InputstreamInfo& info)
 {
   // GetStream is called by Kodi twice times, before and after OpenStream.

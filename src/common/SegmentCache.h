@@ -45,6 +45,11 @@ public:
     uint64_t periodStart{0};
     std::string adaptationId;
     std::string representationId;
+    // Overlay metadata, in microseconds. VOD entries use the complete movie
+    // timeline; live entries retain manifest PTS until the session projects it.
+    uint64_t cacheStartUs{0};
+    uint64_t cacheEndUs{0};
+    std::string cacheTrackId;
 
     bool operator==(const Key& other) const
     {
@@ -52,7 +57,7 @@ public:
              startPts == other.startPts && keyUrl == other.keyUrl && iv == other.iv &&
              periodId == other.periodId && periodSequence == other.periodSequence &&
              periodStart == other.periodStart && adaptationId == other.adaptationId &&
-             representationId == other.representationId;
+             representationId == other.representationId && cacheTrackId == other.cacheTrackId;
     }
   };
 
@@ -89,6 +94,11 @@ public:
                                               const std::string& adaptationId,
                                               const std::string& representationId);
   bool HasPeriod(uint64_t periodStart, const std::string& periodId, uint32_t periodSequence);
+  // Only ranges resident for every selected media track are returned. Track
+  // identities include language and representation, so changing either cannot
+  // make previously downloaded media appear cached for the new selection.
+  std::vector<std::pair<uint64_t, uint64_t>> GetCachedRanges(
+      const std::vector<std::string>& selectedTracks) const;
 
 private:
   struct Entry
@@ -111,6 +121,6 @@ private:
   uint64_t m_nextFileId{0};
   std::filesystem::path m_diskDirectory;
   std::list<Entry> m_entries;
-  std::mutex m_mutex;
+  mutable std::mutex m_mutex;
 };
 } // namespace ADP

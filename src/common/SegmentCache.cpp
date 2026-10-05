@@ -124,7 +124,11 @@ bool SegmentCache::Get(const Key& key,
                                   old.periodSequence == key.periodSequence &&
                                   old.periodStart == key.periodStart &&
                                   old.adaptationId == key.adaptationId &&
-                                  old.representationId == key.representationId;
+                                  old.representationId == key.representationId &&
+                                  old.cacheTrackId == key.cacheTrackId &&
+                                  old.headers.contains("Range") == key.headers.contains("Range") &&
+                                  (!old.headers.contains("Range") ||
+                                   old.headers.at("Range") == key.headers.at("Range"));
                          });
   }
   if (entry == m_entries.end())
@@ -265,4 +269,71 @@ bool SegmentCache::HasPeriod(uint64_t periodStart,
                               entry.key.periodId == periodId &&
                               entry.key.periodSequence == periodSequence;
                      });
+}
+
+std::vector<std::pair<uint64_t, uint64_t>> SegmentCache::GetCachedRanges(
+    const std::vector<std::string>& selectedTracks) const
+{
+  using Ranges = std::vector<std::pair<uint64_t, uint64_t>>;
+  if (!m_available || selectedTracks.empty())
+    return {};
+
+  std::map<std::string, Ranges> tracks;
+  for (const auto& id : selectedTracks)
+    tracks.try_emplace(id);
+  {
+    std::lock_guard lock(m_mutex);
+    for (const Entry& entry : m_entries)
+    {
+      if (!entry.segment || entry.segment->IsInitialization() ||
+          entry.key.cacheEndUs <= entry.key.cacheStartUs)
+        continue;
+      auto track = tracks.find(entry.key.cacheTrackId);
+      if (track != tracks.end())
+        track->second.emplace_back(entry.key.cacheStartUs, entry.key.cacheEndUs);
+    }
+  }
+
+  Ranges common;
+  bool firstTrack{true};
+  for (auto& [id, ranges] : tracks)
+  {
+    if (ranges.empty())
+      return {};
+    std::sort(ranges.begin(), ranges.end());
+    size_t count{0};
+    for (const auto& range : ranges)
+    {
+      // Keep real gaps visible, including a segment evicted by the shared LRU.
+      if (count && range.first <= ranges[count - 1].second)
+        ranges[count - 1].second = std::max(ranges[count - 1].second, range.second);
+      else
+        ranges[count++] = range;
+    }
+    ranges.resize(count);
+    if (firstTrack)
+    {
+      common = std::move(ranges);
+      firstTrack = false;
+      continue;
+    }
+    Ranges intersection;
+    size_t left{0};
+    size_t right{0};
+    while (left < common.size() && right < ranges.size())
+    {
+      const uint64_t begin = std::max(common[left].first, ranges[right].first);
+      const uint64_t end = std::min(common[left].second, ranges[right].second);
+      if (begin < end)
+        intersection.emplace_back(begin, end);
+      if (common[left].second <= ranges[right].second)
+        ++left;
+      else
+        ++right;
+    }
+    common = std::move(intersection);
+    if (common.empty())
+      return {};
+  }
+  return common;
 }

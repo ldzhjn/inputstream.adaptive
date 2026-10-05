@@ -50,6 +50,7 @@ adaptive::AdaptiveStream::AdaptiveStream(AdaptiveTree* tree,
   m_streamHeaders = kodiProps.GetStreamHeaders();
 
   current_rep_->current_segment_.reset();
+  m_cacheTrackId = GetCacheTrackId(initialRepr);
 
   // Set the class id for debug purpose
   clsId = globalClsId++;
@@ -69,9 +70,43 @@ void adaptive::AdaptiveStream::Reset()
 {
   segment_read_pos_ = 0;
   currentPTSOffset_ = 0;
-  if (!m_tree->GetSegmentCache())
+  if (!m_tree->IsLive() || !m_tree->GetSegmentCache())
     absolutePTSOffset_ = 0;
   m_isWaitingForSegment = false;
+}
+
+std::string adaptive::AdaptiveStream::GetCacheTrackId(const CRepresentation* rep) const
+{
+  if (!rep)
+  {
+    std::lock_guard lock(m_cacheTrackMutex);
+    return m_cacheTrackId;
+  }
+  if (!current_adp_ || rep->IsIncludedStream())
+    return {};
+  const auto type = current_adp_->GetStreamType();
+  if (type != StreamType::VIDEO && type != StreamType::AUDIO && type != StreamType::VIDEO_AUDIO)
+    return {};
+  std::string id;
+  const auto add = [&id](const std::string& value)
+  { id += std::to_string(value.size()) + ":" + value; };
+  add(current_adp_->GetId());
+  add(rep->GetId());
+  add(std::to_string(static_cast<int>(current_adp_->GetStreamType())));
+  add(current_adp_->GetLanguage());
+  add(current_adp_->GetName());
+  add(std::to_string(current_adp_->IsOriginal()));
+  add(std::to_string(current_adp_->IsImpaired()));
+  const auto codecs = rep->GetCodecs();
+  add(std::to_string(codecs.size()));
+  for (const auto& codec : codecs)
+    add(codec);
+  add(std::to_string(rep->GetWidth()));
+  add(std::to_string(rep->GetHeight()));
+  add(std::to_string(rep->GetFrameRate()));
+  add(std::to_string(rep->GetFrameRateScale()));
+  add(std::to_string(rep->GetAudioChannels()));
+  return id;
 }
 
 bool adaptive::AdaptiveStream::Download(const DownloadInfo& downloadInfo,
@@ -108,7 +143,7 @@ bool adaptive::AdaptiveStream::DownloadImpl(const DownloadInfo& downloadInfo,
   // A completed cache entry also carries its original segment timing, allowing
   // live manifest refreshes to retain a seek path into downloaded history.
   ADP::SegmentCache* cache = m_tree->GetSegmentCache();
-  const bool useCache = cache && m_tree->IsLive() && !downloadData && downloadInfo.m_segmentBuffer;
+  const bool useCache = cache && !downloadData && downloadInfo.m_segmentBuffer;
   ADP::SegmentCache::Key cacheKey{url, headers, 0, 0};
   bool canStore = false;
   bool isAesSegment = false;
@@ -124,6 +159,7 @@ bool adaptive::AdaptiveStream::DownloadImpl(const DownloadInfo& downloadInfo,
     cacheKey.periodStart = current_period_->GetStart();
     cacheKey.adaptationId = current_adp_->GetId();
     cacheKey.representationId = downloadInfo.m_segmentBuffer->rep->GetId();
+    cacheKey.cacheTrackId = GetCacheTrackId(downloadInfo.m_segmentBuffer->rep);
     isAesSegment = segment.AESKeyInfo().has_value();
     if (isAesSegment)
     {
@@ -267,6 +303,36 @@ bool adaptive::AdaptiveStream::DownloadImpl(const DownloadInfo& downloadInfo,
           // completed metadata so an expired key URL does not break replay.
           const auto& segment = downloadInfo.m_segmentBuffer->segment;
           const std::optional<PLAYLIST::CSegment> timelineSegment = segment;
+          const uint64_t scale = downloadInfo.m_segmentBuffer->rep->GetTimescale();
+          if (!segment.IsInitialization() && scale && segment.startPTS_ != NO_PTS_VALUE &&
+              segment.m_endPts != NO_PTS_VALUE && segment.m_endPts > segment.startPTS_)
+          {
+            const auto toUs = [scale](uint64_t pts)
+            { return (pts / scale) * 1000000 + (pts % scale) * 1000000 / scale; };
+            const uint64_t startUs = toUs(segment.startPTS_);
+            const uint64_t endUs = toUs(segment.m_endPts);
+            if (m_tree->IsLive())
+            {
+              cacheKey.cacheStartUs = startUs;
+              cacheKey.cacheEndUs = endUs;
+            }
+            else
+            {
+              // A prefetched segment can belong to the next representation
+              // before the sample reader switches. Use that representation's
+              // own origin, without reading the reader's mutable PTS offset.
+              const auto* first = downloadInfo.m_segmentBuffer->rep->Timeline().GetFront();
+              const uint64_t originUs =
+                  first && first->startPTS_ != NO_PTS_VALUE ? toUs(first->startPTS_) : endUs;
+              const uint64_t chapterStart =
+                  m_tree->GetPeriodStartTimeUs(current_period_->GetIndex());
+              if (chapterStart != NO_VALUE && endUs > originUs)
+              {
+                cacheKey.cacheStartUs = chapterStart + (std::max(startUs, originUs) - originUs);
+                cacheKey.cacheEndUs = chapterStart + endUs - originUs;
+              }
+            }
+          }
           if (isAesSegment)
             cache->Put(std::move(cacheKey), std::move(cacheData), std::move(cacheChunks),
                        timelineSegment);
@@ -924,6 +990,11 @@ bool adaptive::AdaptiveStream::ensureSegment()
       const SegmentBuffer& currSegBuff = m_segBuffers.FrontSeg();
       current_rep_->SetIsEnabled(false);
       current_rep_ = currSegBuff.rep;
+      {
+        const auto id = GetCacheTrackId(current_rep_);
+        std::lock_guard lock(m_cacheTrackMutex);
+        m_cacheTrackId = id;
+      }
       current_rep_->current_segment_ = currSegBuff.segment;
       current_rep_->SetIsEnabled(true);
 

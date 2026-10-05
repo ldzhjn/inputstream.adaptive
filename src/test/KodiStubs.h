@@ -14,6 +14,8 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <algorithm>
+#include <cstring>
 
 #ifdef _WIN32 // windows
 #if !defined(_SSIZE_T_DEFINED) && !defined(HAVE_SSIZE_T)
@@ -193,6 +195,11 @@ private:
   time_t m_dateTime;
 };
 
+// Opt-in HTTP fixtures for testing the real AdaptiveStream cache path. The
+// default stays unavailable, as with the original filesystem stub.
+inline std::map<std::pair<std::string, std::string>, std::vector<uint8_t>> curlResponses;
+inline std::vector<std::pair<std::string, std::string>> curlOpenRequests;
+
 class CFile
 {
 public:
@@ -205,15 +212,39 @@ public:
   bool IsOpen() const { return false; }
   void Close() {}
 
-  bool CURLCreate(const std::string& url) { return false; }
+  bool CURLCreate(const std::string& url)
+  {
+    m_url = url;
+    return !curlResponses.empty();
+  }
   bool CURLAddOption(CURLOptiontype type, const std::string& name, const std::string& value)
   {
-    return false;
+    if (type == ADDON_CURL_OPTION_HEADER && name == "Range")
+      m_range = value;
+    return !curlResponses.empty();
   }
 
-  bool CURLOpen(unsigned int flags = 0) { return false; }
+  bool CURLOpen(unsigned int flags = 0)
+  {
+    if (curlResponses.empty())
+      return false;
+    curlOpenRequests.emplace_back(m_url, m_range);
+    const auto entry = curlResponses.find({m_url, m_range});
+    if (entry == curlResponses.end())
+      return false;
+    m_data = entry->second;
+    m_position = 0;
+    return true;
+  }
 
-  ssize_t Read(void* ptr, size_t size) { return 0; }
+  ssize_t Read(void* ptr, size_t size)
+  {
+    const size_t count = std::min(size, m_data.size() - m_position);
+    if (count)
+      std::memcpy(ptr, m_data.data() + m_position, count);
+    m_position += count;
+    return static_cast<ssize_t>(count);
+  }
 
   bool ReadLine(std::string& line) { return false; }
 
@@ -243,6 +274,12 @@ public:
 
   const std::string GetPropertyValue(FilePropertyTypes type, const std::string& name) const
   {
+    if (type == ADDON_FILE_PROPERTY_RESPONSE_PROTOCOL && !m_data.empty())
+      return "HTTP/1.1 206 Partial Content";
+    if (type == ADDON_FILE_PROPERTY_EFFECTIVE_URL)
+      return m_url;
+    if (type == ADDON_FILE_PROPERTY_RESPONSE_HEADER && name == "Content-Length" && !m_data.empty())
+      return std::to_string(m_data.size());
     return "";
   }
 
@@ -253,6 +290,12 @@ public:
   }
 
   double GetFileDownloadSpeed() const { return 0.0; }
+
+private:
+  std::string m_url;
+  std::string m_range;
+  std::vector<uint8_t> m_data;
+  size_t m_position{0};
 };
 
 inline bool FileExists(const std::string& filename, bool usecache = false)

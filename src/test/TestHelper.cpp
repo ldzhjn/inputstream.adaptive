@@ -14,7 +14,7 @@
 
 std::string testHelper::testFile;
 std::string testHelper::effectiveUrl;
-std::vector<std::string> testHelper::downloadList;
+TestDownloadLog testHelper::downloadList;
 
 bool testHelper::LoadFile(std::string path, std::string& data)
 {

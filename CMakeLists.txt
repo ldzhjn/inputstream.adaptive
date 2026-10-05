@@ -14,6 +14,9 @@ set(CMAKE_FIND_FRAMEWORK LAST)
 # Sets the default path where the CDM library is contained (affects the default value of the add-on settings)
 set(DECRYPTERPATH "special://home/cdm")
 
+if(KODI_SOURCE_INCLUDE)
+  set(KODI_INCLUDE_DIR "${KODI_SOURCE_INCLUDE}/kodi")
+endif()
 find_package(Kodi REQUIRED)
 find_package(pugixml REQUIRED)
 find_package(Bento4 REQUIRED)
@@ -66,6 +69,11 @@ include_directories(${INCLUDES}
                     src/
 )
 
+# Optional paired Kodi SDK, including its versioned cache overlay extension.
+if(KODI_SOURCE_INCLUDE)
+  include_directories(BEFORE ${KODI_SOURCE_INCLUDE})
+endif()
+
 add_subdirectory(lib/mpegts)
 add_subdirectory(lib/webm_parser)
 
@@ -105,6 +113,24 @@ foreach(DEP_NAME ${DEPS_NAMES_LIST})
 endforeach()
 
 build_addon(inputstream.adaptive ADP DEPLIBS)
+
+# The extended cache callback requires the paired 3.5 SDK at runtime. Kodi's
+# SDK retains a 3.4 minimum for the core to accept older add-ons; the newer
+# binary and its generated dependency must require the SDK they were built for.
+file(STRINGS "${KODI_INCLUDE_DIR}/c-api/addon-instance/inputstream.h" INPUTSTREAM_LEVEL_DEFINE
+     REGEX "^#define INPUTSTREAM_VERSION_LEVEL [0-9]+")
+string(REGEX REPLACE "^#define INPUTSTREAM_VERSION_LEVEL ([0-9]+).*" "\\1"
+       INPUTSTREAM_SDK_LEVEL "${INPUTSTREAM_LEVEL_DEFINE}")
+if(INPUTSTREAM_SDK_LEVEL GREATER_EQUAL 5)
+  # Kodi's build_addon uses file(GENERATE), so the manifest exists only after
+  # generation. Apply its minimum on every build, including incremental ones.
+  add_custom_target(inputstream_cache_manifest ALL
+    COMMAND "${CMAKE_COMMAND}"
+            "-DADP_MANIFEST=${CMAKE_CURRENT_BINARY_DIR}/inputstream.adaptive/addon.xml"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/SetCacheApiMinimum.cmake"
+    DEPENDS inputstream.adaptive
+    VERBATIM)
+endif()
 
 if(NOT CMAKE_CROSSCOMPILING AND BUILD_TESTING)
   list(APPEND CMAKE_CTEST_ARGUMENTS "-V")

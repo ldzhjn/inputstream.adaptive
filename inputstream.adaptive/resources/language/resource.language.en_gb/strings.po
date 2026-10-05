@@ -353,9 +353,9 @@ msgctxt "#30243"
 msgid "Verbose debugging can be useful for debugging components, but in some cases it may expose sensitive information in the log."
 msgstr ""
 
-#. Settings group for replaying previously downloaded live DASH and HLS segments
+#. Settings group for replaying previously downloaded DASH and HLS segments
 msgctxt "#30244"
-msgid "Live segment cache"
+msgid "Segment cache"
 msgstr ""
 
 msgctxt "#30245"
@@ -363,7 +363,7 @@ msgid "Cache mode"
 msgstr ""
 
 msgctxt "#30246"
-msgid "Keep downloaded live DASH or HLS segments seekable from the start of playback while they remain cached. Automatic quality switching is disabled for a continuous replay timeline."
+msgid "Keep downloaded DASH or HLS segments in a shared local cache for replay. Supports live streams and on-demand videos. Automatic quality switching is disabled for cached live streams."
 msgstr ""
 
 msgctxt "#30247"

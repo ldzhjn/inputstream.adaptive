@@ -185,6 +185,8 @@ public:
    *  \return Time in us at start of current chapter/period
    */
   uint64_t GetChapterStartTime() const;
+  std::vector<std::pair<int64_t, int64_t>> GetCachedRangesMs() const;
+  bool HasSegmentCache() const;
 
   /*! \brief Get value of m_chapterSeekTime
    *  \return Time stored in m_chapterSeekTime

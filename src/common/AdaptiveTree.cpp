@@ -104,6 +104,7 @@ namespace adaptive
 
       ChapterInfo info;
       info.id = period->GetId();
+      info.index = period->GetIndex();
       info.tlDuration = period->GetTlDuration();
       info.timescale = period->GetTimescale();
 
@@ -114,6 +115,21 @@ namespace adaptive
     m_chaptersSnapshot = std::move(snapshot);
   }
 
+  uint64_t AdaptiveTree::GetPeriodStartTimeUs(uint16_t periodIndex) const
+  {
+    uint64_t startUs{0};
+    const auto snapshot = GetChaptersSnapshot();
+    for (const auto& chapter : snapshot->chapters)
+    {
+      if (chapter.index == periodIndex)
+        return startUs;
+      if (chapter.timescale)
+        startUs += (chapter.tlDuration / chapter.timescale) * 1000000 +
+                   (chapter.tlDuration % chapter.timescale) * 1000000 / chapter.timescale;
+    }
+    return PLAYLIST::NO_VALUE;
+  }
+
   void AdaptiveTree::PostOpen()
   {
     SortTree();
@@ -121,12 +137,12 @@ namespace adaptive
 
     // The cache belongs to the playback session, not to an individual audio or
     // video worker. This makes the configured size a total limit for all tracks.
-    if (m_isLive && (GetTreeType() == TreeType::DASH || GetTreeType() == TreeType::HLS) &&
+    if ((GetTreeType() == TreeType::DASH || GetTreeType() == TreeType::HLS) &&
         !m_segmentCache)
     {
       const auto& settings = CSrvBroker::GetSettings();
       const std::string mode = settings.GetSegmentCacheMode();
-      LOG::Log(LOGINFO, "Live segment cache setting: mode=%s, size=%u MiB", mode.c_str(),
+      LOG::Log(LOGINFO, "Segment cache setting: mode=%s, size=%u MiB", mode.c_str(),
                settings.GetSegmentCacheSizeMiB());
       if (mode == "memory" || mode == "disk")
       {
@@ -138,12 +154,12 @@ namespace adaptive
             cacheMode, maxBytes, mode == "disk" ? settings.GetSegmentCachePath() : "");
         if (!m_segmentCache->IsAvailable())
         {
-          LOG::Log(LOGERROR, "Cannot initialize live segment cache");
+          LOG::Log(LOGERROR, "Cannot initialize segment cache");
           m_segmentCache.reset();
         }
         else
         {
-          LOG::Log(LOGINFO, "Live segment cache ready: mode=%s", mode.c_str());
+          LOG::Log(LOGINFO, "Segment cache ready: mode=%s", mode.c_str());
         }
       }
     }

@@ -10,6 +10,7 @@ add_executable(${BINARY}
     TestHLSTree.cpp
     TestSmoothTree.cpp
     TestSegmentCache.cpp
+    TestSegmentCacheReplay.cpp
     TestHelper.cpp
     TestUtils.cpp
     ../aes_decrypter.cpp

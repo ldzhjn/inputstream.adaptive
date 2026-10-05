@@ -863,7 +863,9 @@ bool SESSION::CSession::GetNextSample(ISampleReader*& sampleReader)
 
     if (sr->PTS() != STREAM_NOPTS_VALUE && m_timingStream.get() == res)
       m_elapsedTime = PTSToElapsed(sr->PTS(), res) +
-                      (m_adaptiveTree->GetSegmentCache() ? 0 : GetChapterStartTime());
+                      (m_adaptiveTree->IsLive() && m_adaptiveTree->GetSegmentCache()
+                           ? 0
+                           : GetChapterStartTime());
 
     sampleReader = sr;
     return true;
@@ -892,7 +894,7 @@ bool SESSION::CSession::SeekTime(double seekTime, bool& isError)
       return false;
 
     auto pi = m_adaptiveTree->m_periods.cbegin();
-    if (m_adaptiveTree->GetSegmentCache())
+    if (m_adaptiveTree->IsLive() && m_adaptiveTree->GetSegmentCache())
     {
       const uint64_t anchor = m_adaptiveTree->GetCachePlaybackStartPts();
       if (anchor == NO_VALUE)
@@ -1390,4 +1392,57 @@ uint64_t SESSION::CSession::GetMediaDurationMs() const
     return 0;
 
   return m_timingStream->m_adStream.getMaxTimeMs();
+}
+
+std::vector<std::pair<int64_t, int64_t>> SESSION::CSession::GetCachedRangesMs() const
+{
+  std::vector<std::pair<int64_t, int64_t>> result;
+  if (!m_adaptiveTree || !m_adaptiveTree->GetSegmentCache())
+    return result;
+  uint64_t anchor{0};
+  if (m_adaptiveTree->IsLive())
+  {
+    anchor = m_adaptiveTree->GetCachePlaybackStartPts();
+    if (anchor == PLAYLIST::NO_VALUE)
+      return result;
+  }
+  std::vector<std::string> tracks;
+  for (const auto& stream : m_streams)
+  {
+    if (!stream->IsEnabled())
+      continue;
+    const auto id = stream->m_adStream.GetCacheTrackId();
+    // Included audio and subtitles have no separate media download identity.
+    if (!id.empty())
+      tracks.push_back(id);
+  }
+  for (const auto& [begin, end] : m_adaptiveTree->GetSegmentCache()->GetCachedRanges(tracks))
+  {
+    if (end <= anchor)
+      continue;
+    const uint64_t first = (std::max(begin, anchor) - anchor) / 1000;
+    const uint64_t last = (end - anchor) / 1000;
+    if (first < last)
+      result.emplace_back(static_cast<int64_t>(first), static_cast<int64_t>(last));
+  }
+  // The paired Kodi cache extension has a fixed bound. Keep disjoint ranges
+  // around the current cursor when an unusually fragmented LRU exceeds it.
+  if (result.size() > 32)
+  {
+    const int64_t cursor = static_cast<int64_t>(m_elapsedTime / 1000);
+    const auto nearest =
+        std::lower_bound(result.begin(), result.end(), cursor,
+                         [](const auto& range, int64_t time) { return range.second < time; });
+    const size_t index = static_cast<size_t>(nearest - result.begin());
+    const size_t first = std::min(index > 16 ? index - 16 : 0, result.size() - 32);
+    result = std::vector<std::pair<int64_t, int64_t>>(result.begin() + first,
+                                                      result.begin() + first + 32);
+  }
+  return result;
+}
+
+bool SESSION::CSession::HasSegmentCache() const
+{
+  return m_adaptiveTree && m_adaptiveTree->GetSegmentCache() &&
+         m_adaptiveTree->GetSegmentCache()->IsAvailable();
 }

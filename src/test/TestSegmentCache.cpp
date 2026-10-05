@@ -16,6 +16,88 @@
 
 using ADP::SegmentCache;
 
+namespace
+{
+void AddTimedSegment(SegmentCache& cache,
+                     uint64_t number,
+                     uint64_t begin,
+                     uint64_t end,
+                     const std::string& track)
+{
+  SegmentCache::Key key{std::to_string(number), {}, number, begin};
+  key.cacheTrackId = track;
+  key.cacheStartUs = begin;
+  key.cacheEndUs = end;
+  PLAYLIST::CSegment segment;
+  segment.m_number = number;
+  segment.startPTS_ = begin;
+  segment.m_endPts = end;
+  cache.Put(std::move(key), {1}, {}, segment);
+}
+} // namespace
+
+TEST(SegmentCache, ReportsOnlySelectedTracksIntersectionAndEvictedGaps)
+{
+  for (const auto mode : {SegmentCache::Mode::MEMORY, SegmentCache::Mode::DISK})
+  {
+    const auto root = std::filesystem::temp_directory_path() /
+                      ("isa-cache-overlap-" +
+                       std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    {
+      SegmentCache cache{mode, 5, root};
+      ASSERT_TRUE(cache.IsAvailable());
+      AddTimedSegment(cache, 1, 0, 1000000, "video-2160p");
+      AddTimedSegment(cache, 2, 1000000, 2000000, "video-2160p");
+      AddTimedSegment(cache, 3, 500000, 1500000, "audio-en");
+      AddTimedSegment(cache, 4, 0, 2000000, "audio-ja");
+      AddTimedSegment(cache, 5, 0, 2000000, "video-1440p");
+      EXPECT_EQ(cache.GetCachedRanges({"video-2160p", "audio-en"}),
+                (std::vector<std::pair<uint64_t, uint64_t>>{{500000, 1500000}}));
+      EXPECT_TRUE(cache.GetCachedRanges({"video-2160p", "audio-zh"}).empty());
+      EXPECT_EQ(cache.GetCachedRanges({"video-2160p", "audio-ja"}),
+                (std::vector<std::pair<uint64_t, uint64_t>>{{0, 2000000}}));
+
+      // Evict only the earliest 2160p segment. Lower quality cached bytes must
+      // not fill its gap for the current 2160p selection.
+      AddTimedSegment(cache, 6, 3000000, 4000000, "video-2160p");
+      EXPECT_EQ(cache.GetCachedRanges({"video-2160p"}),
+                (std::vector<std::pair<uint64_t, uint64_t>>{{1000000, 2000000},
+                                                          {3000000, 4000000}}));
+      EXPECT_EQ(cache.GetCachedRanges({"video-2160p", "audio-en"}),
+                (std::vector<std::pair<uint64_t, uint64_t>>{{1000000, 1500000}}));
+      // English audio was evicted; Japanese audio must not stand in for it.
+      AddTimedSegment(cache, 7, 4000000, 5000000, "video-2160p");
+      AddTimedSegment(cache, 8, 5000000, 6000000, "video-2160p");
+      EXPECT_TRUE(cache.GetCachedRanges({"video-2160p", "audio-en"}).empty());
+    }
+    EXPECT_TRUE(mode == SegmentCache::Mode::MEMORY || std::filesystem::is_empty(root));
+    if (mode == SegmentCache::Mode::DISK)
+      std::filesystem::remove(root);
+  }
+}
+
+TEST(SegmentCache, RejectsDifferentByteRangeEvenWhenMediaIdentityMatches)
+{
+  SegmentCache cache{SegmentCache::Mode::MEMORY, 32};
+  SegmentCache::Key first{"old-signature", {{"Range", "bytes=10-19"}}, 1, 0};
+  first.cacheTrackId = "video";
+  PLAYLIST::CSegment segment;
+  segment.startPTS_ = 0;
+  segment.m_endPts = 1000;
+  segment.range_begin_ = 10;
+  segment.range_end_ = 19;
+  cache.Put(first, {1, 2}, {}, segment);
+  auto refreshed = first;
+  refreshed.url = "new-signature";
+  std::vector<uint8_t> bytes;
+  EXPECT_TRUE(cache.Get(refreshed, bytes));
+  refreshed.headers["Range"] = "bytes=20-29";
+  EXPECT_FALSE(cache.Get(refreshed, bytes));
+  refreshed.headers["Range"] = "bytes=10-19";
+  refreshed.cacheTrackId = "other-audio";
+  EXPECT_FALSE(cache.Get(refreshed, bytes));
+}
+
 TEST(SegmentCache, SharesOneMemoryLimitAcrossStreams)
 {
   SegmentCache cache{SegmentCache::Mode::MEMORY, 6};

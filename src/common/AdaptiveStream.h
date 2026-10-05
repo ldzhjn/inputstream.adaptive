@@ -122,6 +122,7 @@ enum class EVENT_TYPE
     PLAYLIST::CPeriod* getPeriod() { return current_period_; };
     PLAYLIST::CAdaptationSet* getAdaptationSet() { return current_adp_; };
     PLAYLIST::CRepresentation* getRepresentation() { return current_rep_; };
+    std::string GetCacheTrackId(const PLAYLIST::CRepresentation* rep = nullptr) const;
 
     uint64_t GetCurrentPTSOffset() const { return currentPTSOffset_; }
     uint64_t GetAbsolutePTSOffset() const { return absolutePTSOffset_; }
@@ -270,6 +271,10 @@ enum class EVENT_TYPE
     PLAYLIST::CPeriod* current_period_;
     PLAYLIST::CAdaptationSet* current_adp_;
     PLAYLIST::CRepresentation* current_rep_;
+    // The sample reader can switch representation asynchronously. Cache GUI
+    // callbacks read this identity snapshot rather than touching its pointers.
+    mutable std::mutex m_cacheTrackMutex;
+    std::string m_cacheTrackId;
     PLAYLIST::CRepresentation* m_switchRep{nullptr};
 
     // Decrypter IV used to decrypt HLS segment
